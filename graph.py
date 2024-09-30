@@ -56,10 +56,11 @@ def skeleton_graph(circuit: ReversibleCircuit):
     # gate i finds intersection with gate j and removes the intersecting gates from its set. This is because i cannot have an edge to gate k if there exists gate j between i and k which collides with both i and k.
     for i in range(0, len(circuit.gates)):
         for j in range(i+1, len(circuit.gates)):
-            inter = sets[i].intersection(sets[j])
-            # i removes intersection because i collides with j and j happen to collide with the intersection
-            for v in inter:
-                sets[i].remove(v)
+            if sets[i].__contains__(j):
+                inter = sets[i].intersection(sets[j])
+                # i removes intersection because i collides with j and j happen to collide with the intersection
+                for v in inter:
+                    sets[i].remove(v)
 
     # prepare edges
     edges = []
