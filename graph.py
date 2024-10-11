@@ -1,100 +1,65 @@
 import random
-import networkx as nx
-import matplotlib.pyplot as plt
 from enum import Enum
+from utils import draw_directed_graph
 
-N_DEFAULT = 12
-
-class ControlFunction(Enum):
-    AND = 1
-    OR = 2
-
-class Gate:
-    def __init__(self, target: int, input0: int, input1: int, control_function: ControlFunction=ControlFunction.AND, n: int = N_DEFAULT):
-        self.id = None
-        self.target = target
-        self.input0 = input0
-        self.input1 = input1
-        self.n = n
-        self.control_function = control_function
+class GraphGate:
+    def id(self) -> int:
         pass
 
-class ReversibleCircuit:
-    def __init__(self, gates: [Gate]):
-        self.gates = gates
+    def control0(self) -> int:
+        pass
 
-        # Assign ids to gates
-        for i in range(0, len(self.gates)):
-            self.gates[i].id = i
+    def control1(self) -> int:
+        pass
 
-def check_collision(gate0: Gate, gate1: Gate) -> bool:
-    assert gate0.n == gate1.n
-    return gate0.target == gate1.input0 or gate0.target == gate1.input1 or gate1.target == gate0.input0 or gate1.target == gate0.input1
+    def target(self) -> int:
+        pass
 
-def draw_directed_graph(edges: [list]):
-    G = nx.DiGraph()
+class GraphReversibleCircuit:
+    def gates(self) -> list[GraphGate]:
+        pass
 
-    # Add nodes and directed edges
-    G.add_edges_from(edges)
+class SkeletonGraph(): 
+    def __init__(self, collisions: list[set[int]], circuit: GraphReversibleCircuit):
+        self._collisions = collisions
+        self._circuit = circuit
+    
+    def directed_edges(self) -> list[(int, int)]:
+        # prepare edges
+        edges = []
+        for i in range(0, len(self._circuit.gates())):
+            for j in self._collisions[i]:
+                edges.append((i, j)) 
+        
+        return edges
 
-    # Draw the graph
-    pos = nx.spring_layout(G)  # Position nodes using Fruchterman-Reingold force-directed algorithm
-    nx.draw(G, pos, with_labels=True, node_color='lightblue', node_size=200, font_size=5, font_color='black', arrowstyle='->', arrowsize=10)
+    def collisions(self) -> list[set[int]]:
+        return self._collisions
+    
+    def circuit(self) -> GraphReversibleCircuit:
+        return self._circuit
+   
+def check_collision(gate0: GraphGate, gate1: GraphGate) -> bool:
+    return gate0.target() == gate1.control0() or gate0.target() == gate1.control1() or gate1.target() == gate0.control0() or gate1.target() == gate0.control1()
 
-    plt.title("Directed Graph")
-    plt.show()
-
-def skeleton_graph(circuit: ReversibleCircuit):
+def skeleton_graph(circuit: GraphReversibleCircuit) -> SkeletonGraph:
     sets = []
-    for i in range(0, len(circuit.gates)):
+    total_gates = len(circuit.gates())
+
+    for i in range(0, total_gates):
         curr_set = set()
-        for j in range(i+1, len(circuit.gates)):
-            if check_collision(gate0=circuit.gates[i], gate1=circuit.gates[j]):
-                curr_set.add(circuit.gates[j].id)
+        for j in range(i+1, total_gates):
+            if check_collision(gate0=circuit.gates()[i], gate1=circuit.gates()[j]):
+                curr_set.add(circuit.gates()[j].id())
         sets.append(curr_set)
     
     # gate i finds intersection with gate j and removes the intersecting gates from its set. This is because i cannot have an edge to gate k if there exists gate j between i and k which collides with both i and k.
-    for i in range(0, len(circuit.gates)):
-        for j in range(i+1, len(circuit.gates)):
+    for i in range(0, total_gates):
+        for j in range(i+1, total_gates):
             if sets[i].__contains__(j):
                 inter = sets[i].intersection(sets[j])
                 # i removes intersection because i collides with j and j happen to collide with the intersection
                 for v in inter:
                     sets[i].remove(v)
 
-    # prepare edges
-    edges = []
-    for i in range(0, len(circuit.gates)):
-        for j in sets[i]:
-            edges.append((i, j)) 
-        
-    return edges
-
-
-def random_reversible_circuit(gate_count: int, n: int = N_DEFAULT) -> ReversibleCircuit:
-    gates = []
-    for i in range(0, gate_count):
-        target = random.randint(0, n)
-        input0 = random.randint(0, n)
-        while input0 == target:
-            input0 = random.randint(0, n)
-        input1 = random.randint(0, n)
-        while input1 == target or input1 == input0:
-            input1 = random.randint(0, n)
-        gates.append(Gate(target=target, input0=input0, input1=input1, n=n))
-
-    return ReversibleCircuit(gates=gates)
-
-# circuit0 = ReversibleCircuit(gates=[
-#     Gate(11, 3, 2),
-#     Gate(4, 1, 6),
-#     Gate(3, 2, 1),
-#     Gate(7, 4, 5),
-#     Gate(4, 3, 2),
-#     Gate(5,3, 7),
-#     Gate(6, 9, 1),
-# ])
-
-circuit0 = random_reversible_circuit(gate_count=100, n=1000)
-
-draw_directed_graph(edges=skeleton_graph(circuit=circuit0))
+    return SkeletonGraph(collisions=sets, circuit=circuit)
