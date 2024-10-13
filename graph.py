@@ -1,6 +1,7 @@
 import random
 from enum import Enum
 from utils import draw_directed_graph
+import networkx as nx
 
 class GraphGate:
     def id(self) -> int:
@@ -38,6 +39,11 @@ class SkeletonGraph():
     
     def circuit(self) -> GraphReversibleCircuit:
         return self._circuit
+
+    def nx_graph(self) -> nx.Graph:
+        graph = nx.DiGraph()
+        graph.add_edges_from(self.directed_edges())
+        return graph
    
 def check_collision(gate0: GraphGate, gate1: GraphGate) -> bool:
     return gate0.target() == gate1.control0() or gate0.target() == gate1.control1() or gate1.target() == gate0.control0() or gate1.target() == gate0.control1()
