@@ -5,6 +5,9 @@ from utils import sample_wire, draw_directed_graph, export_gephi, run_community_
 from graph import GraphGate, GraphReversibleCircuit, skeleton_graph, SkeletonGraph
 from typing import Callable, Union
 import networkx as nx
+from itertools import chain
+
+random.seed(10100)
 
 
 TwoBitControl = Callable[[bool, bool], bool]
@@ -416,6 +419,59 @@ def find_replacement(circuit_to_replace: BaseReversibleCircuit, ell_in: int, max
     # print("Total Iterations: ", count)
     return curr_circuit
 
+def find_nodes_on_paths_from_source_to_target(main_graph: nx.Graph, source: int, target: int) -> set[int]:
+    '''
+    This function is a slight modication of DFS algorithm. It is based on observation that we don't require to find all paths, instead we require
+    to find all nodes on any path from source to target. To do so, we simply run the DFS algorithm but observe that if node D is on a path from S to T
+    then all nodes on a path from S to D are also on a path from S to T. Thus we can prune exploration space whenever a node that is fully explored and on some path
+    from S to T is reached. 
+
+    - If a path exists then target and source are guaranteed to be in the set
+    '''
+
+    paths = []
+    path = [source]
+    visited = set()
+    visited_with_paths = set()
+    corr_edges = [list(main_graph.out_edges(source))]
+    while len(path) > 0:
+
+        # find outgoing edges from path[-1]
+        curr_node = path[-1]
+
+        if curr_node == target:
+            # paths.append(copy.deepcopy(path))
+            for node in path:
+                visited_with_paths.add(node)
+            path.pop()
+            corr_edges.pop()
+
+
+        elif curr_node in visited and curr_node in visited_with_paths:
+            for node in path:
+                visited_with_paths.add(node)
+
+        else:
+            outgoing_edges = corr_edges[-1]
+
+            next_node = None 
+            while next_node == None or next_node in visited:
+                if len(outgoing_edges) == 0:
+                    next_node = None    
+                    break
+                
+                next_node = outgoing_edges.pop()[1]
+
+            if next_node is not None:
+                path.append(next_node)
+                corr_edges.append(list(main_graph.out_edges(next_node)))
+            else:
+                visited.add(path.pop())
+                corr_edges.pop()
+
+    return visited_with_paths
+
+
 def find_convex_subset(main_graph: nx.Graph, convex_set_size: int):
     '''
     TODO: Why can't this function return toloptically sorted convex subgraph
@@ -423,112 +479,83 @@ def find_convex_subset(main_graph: nx.Graph, convex_set_size: int):
     
     T = convex_set_size
 
-    v = random.choice(list(main_graph.nodes()))
-    convex_set = {v}
+    times = 0
+    while times < 1:
+
+        v = random.choice(list(main_graph.nodes()))
+        convex_set = {v}
+
+        explored_candidates = set()
+
+        # set of candiadtes to explore
+        unenxplored_candidates = []
+        for node in convex_set:
+            for e in main_graph.edges(node):
+                unenxplored_candidates.append(e[1])
+
+        while len(convex_set) < T:
+            
+            if unenxplored_candidates.__len__() == 0:
+                break
+
+            candidate = random.choice(unenxplored_candidates)
+            unenxplored_candidates.remove(candidate)
+
+            # Union of to_add set over all nodes in current subgraph
+            to_add_set_union = set()
+
+            for r in convex_set:
+                source = r 
+                target = candidate
+
+                to_add_set = find_nodes_on_paths_from_source_to_target(
+                    main_graph=main_graph, 
+                    source=source, 
+                    target=target
+                )
+
+                # User Networkx to find all simple paths from source to target and check that they all exist in to_add_set
+                # 
+                # Note that Networkx all_simple_paths function takes really long occasionally
+                # len(to_add_set.difference(set(chain.from_iterable(list(nx.all_simple_paths(source=source, target=target, G=main_graph)))))) == 0
+
+                to_add_set_union = to_add_set_union.union(to_add_set)
+
+            # remove nodes in the new convex set. new convext set = convex set + condidate
+            assert candidate in to_add_set and source in to_add_set
+            to_add_set_union.difference_update(convex_set)
+            
+            if len(to_add_set_union) + len(convex_set) <= T:
+                # Update convext set with nodes in to_add set
+                convex_set = convex_set.union(to_add_set_union)
+
+                # For newly added nodes add their outgoing edges to unexplored_nodes
+                for node in to_add_set:
+                    if node not in explored_candidates:
+                        unenxplored_candidates.append(node)
+
+            explored_candidates.add(candidate)
 
 
-    root = v
-    explored_candidates = set()
-
-    # generate a set of candidates to explore
-    to_explore_canidates = []
-    for node in convex_set:
-        for e in main_graph.edges(node):
-            to_explore_canidates.append(e[1])
-
-    while len(convex_set) < T:
-        if to_explore_canidates.__len__() == 0:
-            print("Cannot find convex graph")
-            break
+        # return of convex set has necessary size
+        if len(convex_set) == T:            
+            return list(convex_set)
+        else:
+            times += 1
     
-        subset_to_check_against = copy.deepcopy(convex_set)
-
-        # find next
-        # take a random element in the convex set. Expand it by adding randomly one of its edges (At the moment we restrict to outgoing edges. But that isn't necessary)
-        candidate = to_explore_canidates.pop()
-
-        # optimistically add candidate to the set. Then check whether the graph remains convex. 
-        convex_set.add(candidate)
-        
-        visited = set()
-        greedy_add_for_convex = set() #TODO: the moment greedy set grows larger than T it is safe to terminate explortation for the candidate
-        for r in subset_to_check_against:
-            # start DFS
-            
-            # next = (list(graph.out_edges(r))[0])[1]
-                
-            all_paths = []
-            path = []
-            path.append(r)
-            while len(path) > 0:
-                
-                tmp = list(main_graph.out_edges(path[-1]))
-
-                next = None
-                while next==None or next in visited:
-                    if len(tmp) == 0:
-                        next = None
-                        break
-
-                    next = tmp.pop()[1]
-
-                # print(path, next, candidate)
-
-                if next == None:
-                    visited.add(path.pop())
-                elif next == candidate:
-                    all_paths.append(copy.deepcopy(path))
-                    visited.add(path.pop())
-                    # TODO: pop the path entirely because the candidate is found. 
-                    # But I suppose we should keep exploring to find all path 
-                    # because we want to make the set convex
-                else:
-                    path.append(next)
-            
-            print(all_paths)
-            for p in all_paths:
-                for n in p:
-                    if n not in convex_set:
-                        greedy_add_for_convex.add(n)
-            
-        if greedy_add_for_convex.__len__() != 0:
-            # print(list(greedy_add_for_convex))
-            # check whether there's space to add them?
-            if greedy_add_for_convex.__len__() + len(convex_set) <= T:
-
-                # add candidates
-                for node in greedy_add_for_convex:
-                    for e in main_graph.edges(node):
-                        if e[1] not in explored_candidates:
-                            to_explore_canidates.append(e[1])
-                    
-                convex_set = convex_set.union(greedy_add_for_convex)
-            else:
-                convex_set.remove(candidate)
-
-        explored_candidates.add(candidate)
-                
-    return list(convex_set)
-
-    ####### Find the subgraph to repalce. Topoligical sort it. Then convert it into a revesible circuit to compute the permutation #####
+    return None
 
 def mixing_iteration(main_circuit: BaseReversibleCircuit, main_graph: nx.Graph, ell_out: int, ell_in: int):
     # extract a subgraph in of convex se
     convex_set = find_convex_subset(main_graph=main_graph, convex_set_size=ell_out)
 
+    if convex_set == None:
+        print("Didn't find a convex set")
+        return
+
+    # topological sort the gates for correct dependencies. The reversivle circuit of convex subgraph G should reflect the dependencies
     G_convex = main_graph.subgraph(list(convex_set))
-    # topological sort the gates for correct dependencies. The reversivle circuit of concex subgraph G should reflect the dependencies
     gates_id = list(nx.topological_sort(G=G_convex))
-    print(gates_id)
-    try:
-        # Try to find a cycle
-        cycle = nx.find_cycle(main_graph, orientation="original")
-        print(True)  # Cycle exists
-    except nx.NetworkXNoCycle:
-        print(False)  # No cycle exists
-    # print(list(nx.all_simple_paths(G=main_graph, source=gates_id[0], target=gates_id[1])))
-    for f in nx.all_simple_paths(G=main_graph, source=gates_id[0], target=gates_id[1]):
-        print(f)
 
     # construct C_OUT
     # \omega_out = active wires of C_OUT
@@ -643,6 +670,7 @@ def mixing_iteration(main_circuit: BaseReversibleCircuit, main_graph: nx.Graph, 
 main_circuit = _sample_random_reversible_circuit_strategy_2(n=128, gate_count=1000, max_controls=2)
 skeleton = skeleton_graph(circuit=main_circuit)
 main_graph = skeleton.nx_graph()
+# find_nodes_on_paths_from_source_to_target(main_graph=main_graph)
 mixing_iteration(main_circuit=main_circuit, main_graph=main_graph, ell_in=10, ell_out=2)
 
 
