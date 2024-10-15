@@ -2,6 +2,7 @@ import random
 from enum import Enum
 from utils import draw_directed_graph
 import networkx as nx
+import copy
 
 class GraphGate:
     def id(self) -> int:
@@ -68,4 +69,8 @@ def skeleton_graph(circuit: GraphReversibleCircuit) -> SkeletonGraph:
                 for v in inter:
                     sets[i].remove(v)
 
-    return SkeletonGraph(collisions=sets, circuit=circuit)
+    collisions = {}
+    for i in range(0, total_gates):
+        collisions[i] = copy.deepcopy(sets[i])
+
+    return SkeletonGraph(collisions=collisions, circuit=circuit)
