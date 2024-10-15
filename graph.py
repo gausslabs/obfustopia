@@ -43,6 +43,7 @@ class SkeletonGraph():
 
     def nx_graph(self) -> nx.Graph:
         graph = nx.DiGraph()
+        graph.add_nodes_from(list(map(lambda g: g.id(), self.circuit().gates())))
         graph.add_edges_from(self.directed_edges())
         return graph
    

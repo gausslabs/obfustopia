@@ -7,12 +7,12 @@ from typing import Callable, Union
 import networkx as nx
 from itertools import chain
 
-DEBUG = True
+DEBUG = False
 
 GLOBAL_SERIAL = 0
 GLOBAL_GATE_DICT = {}
 
-random.seed(41341)
+# random.seed(3222)
 
 
 TwoBitControl = Callable[[bool, bool], bool]
@@ -125,16 +125,22 @@ class BaseReversibleCircuit(GraphReversibleCircuit):
         self._n = n
         self._sampling_trace = sampling_trace
         self._collision_sets = None
-
-        for (index, g) in enumerate(self._gates):
-            g._id = index
-
     
     def run(self, input: list[bool]):
         assert len(input) == self._n
 
         for g in self._gates:
+            # if g.id() == 85:
+            #     print("#########")
+            #     print(f"Inputs: {input[g.control0()]} {input[g.control1()]} {input[g.target()]}")
             g.run(input)
+            # if g.id() == 85:
+            #     print(f"Outputs: {input[g.control0()]} {input[g.control1()]} {input[g.target()]}")
+            #     print("#########")
+
+    def assign_serial_ids_to_gates(self): 
+        for (index, g) in enumerate(self._gates):
+            g._id = index
     
     def gates(self) -> list[BaseGate]:
         return self._gates
@@ -521,7 +527,7 @@ def find_convex_subset(main_graph: nx.Graph, convex_set_size: int):
     T = convex_set_size
 
     times = 0
-    while times < 1:
+    while times < 100:
 
         v = random.choice(list(main_graph.nodes()))
         convex_set = {v}
@@ -558,7 +564,7 @@ def find_convex_subset(main_graph: nx.Graph, convex_set_size: int):
                 # User Networkx to find all simple paths from source to target and check that they all exist in to_add_set
                 # 
                 # Note that Networkx all_simple_paths function takes really long occasionally
-                len(to_add_set.difference(set(chain.from_iterable(list(nx.all_simple_paths(source=source, target=target, G=main_graph)))))) == 0
+                # len(to_add_set.difference(set(chain.from_iterable(list(nx.all_simple_paths(source=source, target=target, G=main_graph)))))) == 0
 
                 to_add_set_union = to_add_set_union.union(to_add_set)
 
@@ -597,6 +603,7 @@ def mixing_iteration(main_circuit: BaseReversibleCircuit, main_graph: nx.Graph, 
 
     if convex_set == None:
         print("Didn't find a convex set")
+        assert False
         return
 
     # topological sort the gates for correct dependencies. The reversivle circuit of convex subgraph G should reflect the dependencies
@@ -609,23 +616,26 @@ def mixing_iteration(main_circuit: BaseReversibleCircuit, main_graph: nx.Graph, 
             print(GLOBAL_GATE_DICT[g])
         print("--- ----------- ---")
 
-    print("#### Gates that target wire 6 ####")
-    for node in main_graph.nodes():
-        if GLOBAL_GATE_DICT[node].target() == 6:
-            print(GLOBAL_GATE_DICT[node])
-    print("#### Gates that target wire 24 ####")
-    for node in main_graph.nodes():
-        if GLOBAL_GATE_DICT[node].target() == 24:
-            print(GLOBAL_GATE_DICT[node])
-    print("#### Gates that target wire 53 ####")
-    for node in main_graph.nodes():
-        if GLOBAL_GATE_DICT[node].target() == 53:
-            print(GLOBAL_GATE_DICT[node])
+    # print("#### Gates that target wire 36 ####")
+    # for node in main_graph.nodes():
+    #     if GLOBAL_GATE_DICT[node].target() == 36:
+    #         print(GLOBAL_GATE_DICT[node])
+    # print("#### Gates that target wire 48 ####")
+    # for node in main_graph.nodes():
+    #     if GLOBAL_GATE_DICT[node].target() == 48:
+    #         print(GLOBAL_GATE_DICT[node])
+    # print("#### Gates that target wire 49 ####")
+    # for node in main_graph.nodes():
+    #     if GLOBAL_GATE_DICT[node].target() == 49:
+    #         print(GLOBAL_GATE_DICT[node])
+    # print("#### Gates that target wire 56 ####")
+    # for node in main_graph.nodes():
+    #     if GLOBAL_GATE_DICT[node].target() == 56:
+    #         print(GLOBAL_GATE_DICT[node])
 
-    print("#### Information about 49 ####")
-    print("Out edges: ", main_graph.out_edges(49))
-    print("In edges: ", main_graph.in_edges(49))
-
+    # print("More information about gate 85")
+    # print("     Predecessors: ", main_graph.in_edges(85))
+    # print("     Successors  : ", main_graph.out_edges(85))
 
 
     # construct C_OUT
@@ -676,6 +686,7 @@ def mixing_iteration(main_circuit: BaseReversibleCircuit, main_graph: nx.Graph, 
     c_dash_in = find_replacement(circuit_to_replace=c_out, ell_in=ell_in, max_controls=3)
     # print("======C'_IN======")
     # print(c_dash_in.print_circuit())
+    assert nx.is_weakly_connected(skeleton_graph(circuit=c_dash_in).nx_graph())
 
     # C_IN with gates with only 2 control wires
     c_in = c_dash_in.break_into_2_way_gates()
@@ -696,19 +707,17 @@ def mixing_iteration(main_circuit: BaseReversibleCircuit, main_graph: nx.Graph, 
     new_to_old_map[c_in._n-1] = k_wire
     if DEBUG:
         print("k_wire: ", k_wire)
-    id_serial = GLOBAL_SERIAL
     for g in c_in.gates():
-        id_serial += 1
+        GLOBAL_SERIAL += 1
         cin_gates.append(
             BaseGate(
                control_0=new_to_old_map[g.control0()],
                control_1=new_to_old_map[g.control1()],
                control_function=g.control_function(),
                target=new_to_old_map[g.target()],
-               id=id_serial
+               id=GLOBAL_SERIAL
             )
         )
-    GLOBAL_SERIAL = id_serial
     if DEBUG:
         print("--- C_IN gates ---")
         for g in cin_gates:
@@ -721,13 +730,11 @@ def mixing_iteration(main_circuit: BaseReversibleCircuit, main_graph: nx.Graph, 
 
     imm_predecessors = set()
     for id in gates_id:
-        for node in main_graph.in_edges(id):
-            imm_predecessors.add(node[0])
+        dfs_with_edge_fn(source=id, visited=imm_predecessors, edges_fn=lambda node: map(lambda x: x[0], main_graph.in_edges(node)))
     imm_predecessors.difference_update(set(gates_id))
     imm_successors = set()
     for id in gates_id:
-        for node in main_graph.out_edges(id):
-            imm_successors.add(node[1])
+        dfs_with_edge_fn(source=id, visited=imm_successors, edges_fn=lambda node: map(lambda x: x[1], main_graph.out_edges(node)))
     imm_successors.difference_update(set(gates_id))
 
     if DEBUG:
@@ -823,15 +830,19 @@ def mixing_iteration(main_circuit: BaseReversibleCircuit, main_graph: nx.Graph, 
     # But within the outsider set I don't want to create unecessary dependencies. Let's say there are two nodes in outsider set A and B and A collides with B. Both A and B collide with new gate
     # C in C_IN. I don't want to draw a dependency from both A and B to C. Instead only B should have a dependency to C. 
 
-    # filter out outsiders that don't touch the new wire k
-    to_remove = set()
-    for node in outside_set:
-        g = GLOBAL_GATE_DICT[node]
-        if g.control0() != k_wire and g.control1() != k_wire and g.target() != k_wire:
-            to_remove.add(node)
-    outside_set.difference_update(to_remove)
-    if DEBUG:
-        print("Outside set post removal of gate that don't touch k_wire: ", outside_set)
+    # Initially I had assumed that we can filter out outside nodes that don't touch wire k. But doing so is incorrect. 
+    # Outside node can still collide with a gate in C_IN even if it does not touches the new wire k. For example, they 
+    # may collide with new gate that does not touches wire k. 
+    #
+    # to_remove = set()
+    # for node in outside_set:
+    #     g = GLOBAL_GATE_DICT[node]
+    #     if g.control0() != k_wire and g.control1() != k_wire and g.target() != k_wire:
+    #         to_remove.add(node)
+    # outside_set.difference_update(to_remove)
+    # if DEBUG:
+    #     print("Outside set post removal of gate that don't touch k_wire: ", outside_set)
+
     # filter out gates that don't collide with any gate in C_IN
     to_remove = set()
     for node in outside_set:
@@ -844,9 +855,12 @@ def mixing_iteration(main_circuit: BaseReversibleCircuit, main_graph: nx.Graph, 
             to_remove.add(gi)
     outside_set.difference_update(to_remove)
     if DEBUG:
-        print("Outside set post removal of gates that don't collide with any of C_IN gates: ", outside_set)
-    # figure out internal dependency within outside_set
-    remove_nodes = set()
+        print("Outside set post removal of gates that don't collide with any of C_IN gates (final): ", outside_set)
+    
+    # Initially I had assumed that if A depends on B, then we an ignore A because B suffices to express the dependency. 
+    # But doing so is incorrect. Because B may collide with a later gate in C_IN whereas A may collide with some earlier gate
+    # in C_IN. 
+    # remove_nodes = set()
     # remove the nodes which have succecors (or prdecessors) in the list.
     # for i in outside_set:
     #     for j in outside_set:
@@ -858,10 +872,10 @@ def mixing_iteration(main_circuit: BaseReversibleCircuit, main_graph: nx.Graph, 
         # for j in range(0, len(outside_set_list)):
             # if j in main_circuit.collision_sets()[i]:
                 # remove_nodes.add(i)
-    outside_set.difference_update(remove_nodes)
+    # outside_set.difference_update(remove_nodes)
 
-    if DEBUG:
-        print("Outside set final: ", outside_set)
+    # if DEBUG:
+    #     print("Outside set final: ", outside_set)
 
     ##### Update the main circuit and main graph #####
 
@@ -873,6 +887,7 @@ def mixing_iteration(main_circuit: BaseReversibleCircuit, main_graph: nx.Graph, 
     # Remove nodes of C_OUT
     for id in gates_id:
         main_graph.remove_node(id)
+        del GLOBAL_GATE_DICT[id]
 
     # Add nodes and edges for internal dependency withing C_IN
     to_add_edges = []
@@ -922,30 +937,48 @@ def mixing_iteration(main_circuit: BaseReversibleCircuit, main_graph: nx.Graph, 
         print("Outside set edges: ", to_add_edges)
     main_graph.add_edges_from(to_add_edges)  
 
-    print("#### Gates that target wire 6 ####")
-    for node in main_graph.nodes():
-        if GLOBAL_GATE_DICT[node].target() == 6:
-            print(GLOBAL_GATE_DICT[node])
-    print("#### Gates that target wire 24 ####")
-    for node in main_graph.nodes():
-        if GLOBAL_GATE_DICT[node].target() == 24:
-            print(GLOBAL_GATE_DICT[node])
-    print("#### Gates that target wire 53 ####")
-    for node in main_graph.nodes():
-        if GLOBAL_GATE_DICT[node].target() == 53:
-            print(GLOBAL_GATE_DICT[node])
+    # print("#### Gates that target wire 36 ####")
+    # for node in main_graph.nodes():
+    #     if GLOBAL_GATE_DICT[node].target() == 36:
+    #         print(GLOBAL_GATE_DICT[node])
+    # print("#### Gates that target wire 48 ####")
+    # for node in main_graph.nodes():
+    #     if GLOBAL_GATE_DICT[node].target() == 48:
+    #         print(GLOBAL_GATE_DICT[node])
+    # print("#### Gates that target wire 49 ####")
+    # for node in main_graph.nodes():
+    #     if GLOBAL_GATE_DICT[node].target() == 49:
+    #         print(GLOBAL_GATE_DICT[node])
+    # print("#### Gates that target wire 56 ####")
+    # for node in main_graph.nodes():
+    #     if GLOBAL_GATE_DICT[node].target() == 56:
+    #         print(GLOBAL_GATE_DICT[node])
+
+    # print("More information about gate 85")
+    # print("     Predecessors: ", main_graph.in_edges(85))
+    # print("     Successors  : ", main_graph.out_edges(85))
+    # print("GATE 11 more information: ")
+    # print(f"    in_edges: ", list(main_graph.in_edges(11)))
+    # print(f"    out_edges: ", list(main_graph.out_edges(11)))
+    # print("GATE: ", GLOBAL_GATE_DICT[6])
+    # print("GATE: ", GLOBAL_GATE_DICT[7])
+    # print("#### Gates that target wire 24 ####")
+    # for node in main_graph.nodes():
+    #     if GLOBAL_GATE_DICT[node].target() == 24:
+    #         print(GLOBAL_GATE_DICT[node])
+    # print("#### Gates that target wire 53 ####")
+    # for node in main_graph.nodes():
+    #     if GLOBAL_GATE_DICT[node].target() == 53:
+    #         print(GLOBAL_GATE_DICT[node])
 
     assert nx.is_directed_acyclic_graph(G=main_graph) == True
 
 
 def skeleton_graph_to_reversible_circuit(main_graph: nx.Graph, gates_dict: dict[int: BaseGate], n: int) -> BaseReversibleCircuit:
     ordered_gates = list(nx.topological_sort(G=main_graph))
-    print("Topological ordering of gates: ", ordered_gates)
-
     gates = []
     for g_id in ordered_gates:
-        if g_id < 102:
-            gates.append(copy.deepcopy(gates_dict[g_id]))
+        gates.append(copy.deepcopy(gates_dict[g_id]))
 
     return BaseReversibleCircuit(
         gates=gates,
@@ -977,36 +1010,50 @@ def test_circuit_decomposition(circuit1=BaseReversibleCircuit):
 # test_circuit_decomposition(circuit1=_sample_random_reversible_circuit_strategy_2(n=5, gate_count=20, max_controls=3))
 
 main_circuit = _sample_random_reversible_circuit_strategy_2(n=64, gate_count=100, max_controls=2)
+main_circuit.assign_serial_ids_to_gates()
 global_vars_from_gates(gates=main_circuit._gates)
 skeleton = skeleton_graph(circuit=main_circuit)
 main_circuit._collision_sets = skeleton.collisions()
 main_graph = skeleton.nx_graph()
+assert nx.is_weakly_connected(G=main_graph) == True
 print(list(nx.topological_sort(G=main_graph)))
-mix_iterations = 1
+mix_iterations = 10
 for i in range(0, mix_iterations):
+    print(f"######### ITERATION {i} #########")
+    c_before = skeleton_graph_to_reversible_circuit(main_graph=main_graph, gates_dict=GLOBAL_GATE_DICT, n=main_circuit._n)
+    print("Topological ordering of gates (before): ", list(nx.topological_sort(G=main_graph)))
     mixing_iteration(main_circuit=main_circuit, main_graph=main_graph, ell_in=10, ell_out=2)
-mixed_circuit = skeleton_graph_to_reversible_circuit(main_graph=main_graph, gates_dict=GLOBAL_GATE_DICT, n=main_circuit._n)
+    print("Topological ordering of gates (after ): ", list(nx.topological_sort(G=main_graph)))
+    # Check circuit equivalence after iteration 
+    c_after = skeleton_graph_to_reversible_circuit(main_graph=main_graph, gates_dict=GLOBAL_GATE_DICT, n=main_circuit._n)
+
+    # print("##### Main Circuit #####")
+    # for g in main_circuit.gates():
+    #     print(g)
+    # print("##### Mixed Circuit #####")
+    # for g in mixed_circuit.gates():
+    #     print(g)
 
 
-for i in range(0, 100):
-    random_value = random.randrange(0, 1<<main_circuit._n)
-    random_input = []
-    for i in range(0, main_circuit._n):
-        random_input.append(bool((random_value>>i)&1))
-    output1 = copy.deepcopy(random_input)
-    main_circuit.run(input=output1)
-    output2 = copy.deepcopy(random_input)
-    mixed_circuit.run(input=output2)
+    for i in range(0, 1000):
+        random_value = random.randrange(0, 1<<main_circuit._n)
+        random_input = []
+        for i in range(0, main_circuit._n):
+            random_input.append(bool((random_value>>i)&1))
+        output1 = copy.deepcopy(random_input)
+        c_before.run(input=output1)
+        output2 = copy.deepcopy(random_input)
+        c_after.run(input=output2)
 
-    mismatching_indices = []
-    for (index, (i0, i1)) in enumerate(zip(output1, output2)):
-        if i0 != i1:
-            mismatching_indices.append(index)
-    
-    if output1 != output2:
-        print("Output mismatch indices: ", mismatching_indices)
+        mismatching_indices = []
+        for (index, (i0, i1)) in enumerate(zip(output1, output2)):
+            if i0 != i1:
+                mismatching_indices.append(index)
+        
+        if output1 != output2:
+            print("Output mismatch indices: ", mismatching_indices)
 
-    assert output1 == output2
+        assert output1 == output2
 
 
 # draw_directed_graph(edges=skeleton.directed_edges())
