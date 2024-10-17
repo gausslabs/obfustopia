@@ -1,6 +1,16 @@
-use rand::{distributions::Uniform, thread_rng, Rng};
+use itertools::Itertools;
+use petgraph::{
+    graph::{self, NodeIndex},
+    visit::{IntoNeighborsDirected, NodeRef},
+    Direction::Outgoing,
+    Graph,
+};
+use rand::{distributions::Uniform, thread_rng, Rng, RngCore};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::{
+    cell::Cell,
+    collections::{HashMap, HashSet},
+};
 
 trait Gate {
     type Input: ?Sized;
@@ -10,10 +20,13 @@ trait Gate {
     fn run(&self, input: &mut Self::Input);
     fn target(&self) -> Self::Target;
     fn controls(&self) -> &Self::Controls;
+    fn check_collision(&self, other: &Self) -> bool;
+    fn id(&self) -> usize;
 }
 
 #[derive(Clone)]
 struct BaseGate<const N: usize, D> {
+    id: usize,
     target: D,
     controls: [D; N],
     control_func: fn(&[D; N], &[bool]) -> bool,
@@ -21,7 +34,7 @@ struct BaseGate<const N: usize, D> {
 
 impl<const N: usize, D> Gate for BaseGate<N, D>
 where
-    D: Into<usize> + Copy,
+    D: Into<usize> + Copy + PartialEq,
 {
     type Input = [bool];
     type Controls = [D; N];
@@ -39,6 +52,14 @@ where
 
     fn target(&self) -> Self::Target {
         self.target
+    }
+
+    fn check_collision(&self, other: &Self) -> bool {
+        other.controls().contains(&self.target()) || self.controls().contains(&other.target())
+    }
+
+    fn id(&self) -> usize {
+        self.id
     }
 }
 
@@ -121,6 +142,7 @@ fn sample_circuit_with_base_gate(
     let mut gates = Vec::with_capacity(gate_count);
     let mut curr_gate = 0;
     let mut sample_trace = Sha256::new();
+    let mut id = 0;
     while curr_gate < gate_count {
         let if_true_three = rng.gen_bool(1.0 - two_prob);
         let gate = if if_true_three {
@@ -147,6 +169,7 @@ fn sample_circuit_with_base_gate(
             ));
 
             BaseGate::<3, u8> {
+                id,
                 target: target,
                 controls: controls,
                 control_func: (|controls, inputs| {
@@ -177,6 +200,7 @@ fn sample_circuit_with_base_gate(
             sample_trace.update(format!("TWO{target}{}{}", controls[0], controls[1]));
 
             BaseGate::<3, u8> {
+                id,
                 target: target,
                 controls: controls,
                 control_func: (|controls, inputs| {
@@ -184,6 +208,7 @@ fn sample_circuit_with_base_gate(
                 }),
             }
         };
+        id += 1;
         gates.push(gate);
     }
 
@@ -275,7 +300,7 @@ where
 
 fn print_circuit_with_base_gates<const N: usize, D>(circuit: &Circuit<BaseGate<N, D>>)
 where
-    D: Into<usize> + Copy,
+    D: Into<usize> + Copy + PartialEq,
 {
     println!();
     println!("{:-<15}", "");
@@ -310,41 +335,203 @@ where
     println!();
 }
 
-fn break_and_find() {
-    let ell_out = 7;
-    let n = 7;
-    let (circuit, _) = sample_circuit_with_base_gate(ell_out, n, 1.0);
+fn dfs(
+    curr_node: NodeIndex,
+    visited_with_path: &mut HashSet<NodeIndex>,
+    visited: &mut HashSet<NodeIndex>,
+    path: &mut Vec<NodeIndex>,
+    graph: &Graph<usize, usize>,
+) {
+    if visited_with_path.contains(&curr_node) {
+        path.iter().for_each(|node| {
+            visited_with_path.insert(*node);
+        });
+        return;
+    }
 
-    println!("Main Circuit: ");
-    print_circuit_with_base_gates(&circuit);
+    if visited.contains(&curr_node) {
+        return;
+    }
 
-    let (first_circuit, second_circuit) = circuit.split_circuit(3);
-    println!("Main First Circuit: ");
-    print_circuit_with_base_gates(&first_circuit);
-    println!("Main Second Circuit: ");
-    print_circuit_with_base_gates(&second_circuit);
-
-    let first_replacement = replacement_circuit(&first_circuit, 3).unwrap();
-    let second_replacement = replacement_circuit(&second_circuit, 4).unwrap();
-
-    println!("Replacement First Circuit: ");
-    print_circuit_with_base_gates(&first_replacement);
-    println!("Replacement Second Circuit: ");
-    print_circuit_with_base_gates(&second_replacement);
+    path.push(curr_node.clone());
+    for v in graph.neighbors_directed(curr_node.into(), Outgoing) {
+        dfs(v, visited_with_path, visited, path, graph);
+    }
+    path.pop();
+    visited.insert(curr_node);
 }
 
-fn main() {
-    // break_and_find();
-    let ell_out = 5;
-    let ell_in = 5;
-    let n = 11;
-    let (circuit, _) = sample_circuit_with_base_gate(ell_out, n, 1.0);
-    print_circuit_with_base_gates(&circuit);
+fn find_convex_subcircuit<R: RngCore>(
+    graph: &Graph<usize, usize>,
+    ell_out: usize,
+    rng: &mut R,
+) -> HashSet<NodeIndex> {
+    // find a random source
+    // find the unexplored candidate set
+    //
 
-    let replacement_circuit = replacement_circuit(&circuit, ell_in).unwrap();
-    print_circuit_with_base_gates(&replacement_circuit);
-    println!("Input permutation map: ");
-    print_permutation_map(&circuit);
-    println!("Output permutation map: ");
-    print_permutation_map(&replacement_circuit);
+    let start_node = NodeIndex::from(rng.gen_range(0..graph.node_count()) as u32);
+
+    let mut explored_candidates = HashSet::new();
+    let mut unexplored_candidates = vec![];
+    // TODO: Why does this always has to outgoing?
+    for outgoing in graph.neighbors_directed(start_node, Outgoing) {
+        unexplored_candidates.push(outgoing);
+    }
+
+    let mut convex_set = HashSet::new();
+    convex_set.insert(start_node);
+
+    while convex_set.len() < ell_out {
+        let candidate = unexplored_candidates.pop();
+
+        if candidate.is_none() {
+            break;
+        }
+
+        let mut union_vertices_visited_with_path = HashSet::new();
+        let mut union_vertices_visited = HashSet::new();
+        let mut path = vec![];
+        union_vertices_visited_with_path.insert(candidate.unwrap());
+        for source in convex_set.iter() {
+            dfs(
+                source.clone(),
+                &mut union_vertices_visited_with_path,
+                &mut union_vertices_visited,
+                &mut path,
+                graph,
+            );
+        }
+
+        // Remove nodes in the exisiting convex set. The resulting set contains nodes that when added to convex set the set still remains convex.
+        union_vertices_visited_with_path.retain(|node| !convex_set.contains(node));
+
+        if union_vertices_visited_with_path.len() + convex_set.len() <= ell_out {
+            union_vertices_visited_with_path.iter().for_each(|node| {
+                convex_set.insert(node.clone());
+            });
+
+            if convex_set.len() < ell_out {
+                // more exploration to do
+                union_vertices_visited_with_path
+                    .into_iter()
+                    .for_each(|node| {
+                        // add more candidates to explore
+                        for outgoing in graph.neighbors_directed(node, Outgoing) {
+                            if !explored_candidates.contains(&outgoing) {
+                                unexplored_candidates.push(outgoing);
+                            }
+                        }
+                    });
+                explored_candidates.insert(candidate.unwrap());
+            }
+        } else {
+            explored_candidates.insert(candidate.unwrap());
+        }
+    }
+
+    return convex_set;
+}
+
+fn circuit_to_skeleton_graph<G: Gate>(circuit: &Circuit<G>) -> Graph<usize, usize> {
+    let mut all_collision_sets = Vec::with_capacity(circuit.gates.len());
+    for (i, gi) in circuit.gates.iter().enumerate() {
+        let mut collision_set_i = HashSet::new();
+        for (j, gj) in (circuit.gates.iter().enumerate()).skip(i + 1) {
+            if gi.check_collision(gj) {
+                collision_set_i.insert(j);
+            }
+        }
+        all_collision_sets.push(collision_set_i);
+    }
+
+    // Remove intsecting collisions. That is i can collide with j iff there is not k between i < k < j with which both i & j collide
+    for (i, _) in circuit.gates.iter().enumerate() {
+        for (j, gj) in circuit.gates.iter().enumerate().skip(i + 1) {
+            if all_collision_sets[i].contains(&j) {
+                let (first, second) = all_collision_sets.split_at_mut(j);
+                let collisions_set_i = first.last_mut().unwrap();
+                let collisions_set_j = &second.first().unwrap();
+                // remove id k from set of i iff k is in set of j (ie j, where j < k, collides with k)
+                collisions_set_i.retain(|k| !collisions_set_j.contains(k));
+            }
+        }
+    }
+
+    let mut skeleton = Graph::<usize, usize>::new();
+    // add nodes with weights as ids
+    let nodes = circuit
+        .gates
+        .iter()
+        .map(|g| skeleton.add_node(g.id()))
+        .collect_vec();
+    let edges = all_collision_sets.iter().enumerate().flat_map(|(i, set)| {
+        // FIXME(Jay): Had to collect_vec due to lifetime issues
+        let v = set.iter().map(|j| (nodes[i], nodes[*j])).collect_vec();
+        v.into_iter()
+    });
+
+    skeleton.extend_with_edges(edges);
+
+    return skeleton;
+}
+
+#[cfg(test)]
+mod tests {
+    use petgraph::algo::all_simple_paths;
+
+    use super::*;
+
+    #[test]
+    fn trial() {
+        let gates = 50;
+        let n = 10;
+        let (circuit, _) = sample_circuit_with_base_gate(gates, n, 1.0);
+        let mut skeleton_graph = circuit_to_skeleton_graph(&circuit);
+
+        let mut rng = thread_rng();
+        let convex_subset = find_convex_subcircuit(&skeleton_graph, 5, &mut rng);
+        println!("Convex subset: {:?}", convex_subset);
+    }
+
+    #[test]
+    fn test_dfs() {
+        let gates = 50;
+        let n = 10;
+        let (circuit, _) = sample_circuit_with_base_gate(gates, n, 1.0);
+        let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+
+        let mut visited_with_path = HashSet::new();
+        let mut visited = HashSet::new();
+        let mut path = vec![];
+        let source = NodeIndex::from(2);
+        let target = NodeIndex::from(8);
+        visited_with_path.insert(target);
+        dfs(
+            source,
+            &mut visited_with_path,
+            &mut visited,
+            &mut path,
+            &skeleton_graph,
+        );
+
+        // visited path will always contain `target` even if no path exists from source to target. Here we remove it.
+        if visited_with_path.len() == 1 {
+            assert!(visited_with_path.remove(&target));
+        }
+
+        // println!("Visited nodes: {:?}", &visited_with_path);
+
+        // visited nodes must equal all nodes on all paths from source to target
+        let mut expected_visited_nodes = HashSet::new();
+        all_simple_paths::<Vec<_>, _>(&skeleton_graph, source, target, 0, None)
+            .into_iter()
+            .for_each(|path| {
+                path.into_iter().for_each(|node| {
+                    expected_visited_nodes.insert(node);
+                });
+            });
+
+        assert_eq!(visited_with_path, expected_visited_nodes);
+    }
 }
