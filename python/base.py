@@ -7,7 +7,7 @@ from typing import Callable, Union
 import networkx as nx
 from itertools import chain
 
-DEBUG = False
+DEBUG = True
 
 GLOBAL_SERIAL = 0
 GLOBAL_GATE_DICT = {}
@@ -422,7 +422,7 @@ def check_input_output_permutation(circuit: BaseReversibleCircuit, permutation_m
 def find_replacement(circuit_to_replace: BaseReversibleCircuit, ell_in: int, max_controls: int=2) -> BaseReversibleCircuit:
     permutation_map = input_output_permutation(circuit=circuit_to_replace)
 
-    # print("No. of wires: ", circuit_to_replace._n)
+    print("No. of wires: ", circuit_to_replace._n)
     # print("Permutation map: ", permutation_map)
     # print(circuit_to_replace.print_circuit())
 
@@ -439,7 +439,7 @@ def find_replacement(circuit_to_replace: BaseReversibleCircuit, ell_in: int, max
         curr_circuit = _sample_random_reversible_circuit_strategy_2(n=circuit_to_replace._n, gate_count=ell_in, max_controls=max_controls)
 
         if curr_circuit._sampling_trace in exhausted_circuits:
-            # print("Sampled TWICE: ", curr_circuit._sampling_trace)
+            print("Sampled TWICE: ", curr_circuit._sampling_trace)
             pass
         else:
             exhausted_circuits.add(curr_circuit._sampling_trace)
@@ -561,6 +561,10 @@ def find_convex_subset(main_graph: nx.Graph, convex_set_size: int):
                     target=target
                 )
 
+                if len(to_add_set) != 0:
+                    assert source in to_add_set
+                    assert target in to_add_set
+
                 # User Networkx to find all simple paths from source to target and check that they all exist in to_add_set
                 # 
                 # Note that Networkx all_simple_paths function takes really long occasionally
@@ -568,8 +572,7 @@ def find_convex_subset(main_graph: nx.Graph, convex_set_size: int):
 
                 to_add_set_union = to_add_set_union.union(to_add_set)
 
-            # remove nodes in the new convex set. new convext set = convex set + condidate
-            assert candidate in to_add_set and source in to_add_set
+            # remove nodes in the existing convex set.
             to_add_set_union.difference_update(convex_set)
             
             if len(to_add_set_union) + len(convex_set) <= T:
@@ -592,7 +595,7 @@ def find_convex_subset(main_graph: nx.Graph, convex_set_size: int):
     
     return None
 
-def mixing_iteration(main_circuit: BaseReversibleCircuit, main_graph: nx.Graph, ell_out: int, ell_in: int):
+def mixing_iteration(main_circuit: BaseReversibleCircuit, main_graph: nx.Graph, ell_out: int, ell_in: int, max_controls: int=2):
     global GLOBAL_GATE_DICT
     global GLOBAL_SERIAL
 
@@ -679,13 +682,13 @@ def mixing_iteration(main_circuit: BaseReversibleCircuit, main_graph: nx.Graph, 
             )
         )
     c_out = BaseReversibleCircuit(gates=gates, n=len(omega_out))
-    # print("======C_OUT======")
-    # print(c_out.print_circuit())
+    print("======C_OUT======")
+    print(c_out.print_circuit())
 
     # C_IN with gates with maybe 3-4 control wires
-    c_dash_in = find_replacement(circuit_to_replace=c_out, ell_in=ell_in, max_controls=3)
-    # print("======C'_IN======")
-    # print(c_dash_in.print_circuit())
+    c_dash_in = find_replacement(circuit_to_replace=c_out, ell_in=ell_in, max_controls=max_controls)
+    print("======C'_IN======")
+    print(c_dash_in.print_circuit())
     assert nx.is_weakly_connected(skeleton_graph(circuit=c_dash_in).nx_graph())
 
     # C_IN with gates with only 2 control wires
@@ -1009,7 +1012,7 @@ def test_circuit_decomposition(circuit1=BaseReversibleCircuit):
 
 # test_circuit_decomposition(circuit1=_sample_random_reversible_circuit_strategy_2(n=5, gate_count=20, max_controls=3))
 
-main_circuit = _sample_random_reversible_circuit_strategy_2(n=64, gate_count=100, max_controls=2)
+main_circuit = _sample_random_reversible_circuit_strategy_2(n=128, gate_count=1000, max_controls=2)
 main_circuit.assign_serial_ids_to_gates()
 global_vars_from_gates(gates=main_circuit._gates)
 skeleton = skeleton_graph(circuit=main_circuit)
@@ -1021,8 +1024,10 @@ mix_iterations = 10
 for i in range(0, mix_iterations):
     print(f"######### ITERATION {i} #########")
     c_before = skeleton_graph_to_reversible_circuit(main_graph=main_graph, gates_dict=GLOBAL_GATE_DICT, n=main_circuit._n)
-    print("Topological ordering of gates (before): ", list(nx.topological_sort(G=main_graph)))
-    mixing_iteration(main_circuit=main_circuit, main_graph=main_graph, ell_in=10, ell_out=2)
+    # print("Topological ordering of gates (before): ", list(nx.topological_sort(G=main_graph)))
+    random_ell_out = random.randrange(2, 8)
+    print("\ell_OUT: ", random_ell_out)
+    mixing_iteration(main_circuit=main_circuit, main_graph=main_graph, ell_in=10, ell_out=random_ell_out, max_controls=3)
     print("Topological ordering of gates (after ): ", list(nx.topological_sort(G=main_graph)))
     # Check circuit equivalence after iteration 
     c_after = skeleton_graph_to_reversible_circuit(main_graph=main_graph, gates_dict=GLOBAL_GATE_DICT, n=main_circuit._n)
