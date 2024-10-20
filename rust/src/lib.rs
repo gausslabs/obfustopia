@@ -278,10 +278,8 @@ where
 /// Checks whether collisions set of any circuit is weakly connected.
 ///
 /// Any directed graph is weakly connected if the underlying undirected graph is fully connected.
-fn is_collisions_set_weakly_connected(
-    collisions_set: &[HashSet<usize>],
-    gate_count: usize,
-) -> bool {
+fn is_collisions_set_weakly_connected(collisions_set: &[HashSet<usize>]) -> bool {
+    let gate_count = collisions_set.len();
     // row major matrix
     let mut undirected_graph = vec![false; gate_count * gate_count];
     for (i, set_i) in collisions_set.iter().enumerate() {
@@ -295,17 +293,23 @@ fn is_collisions_set_weakly_connected(
         }
     }
 
-    let mut nodes_visited = HashSet::new();
-    let mut path = vec![0];
+    let mut all_nodes: HashSet<usize> = HashSet::from_iter(0..gate_count);
+    let mut nodes_visited: HashSet<usize> = HashSet::new();
+    let mut stack = vec![0];
     let mut is_weakly_connected = true;
     while nodes_visited.len() < gate_count {
-        let curr_node = path.pop();
+        let curr_node = stack.pop();
         match curr_node {
             Some(curr_node) => {
-                for k in gate_count * curr_node..gate_count * curr_node + gate_count {
-                    nodes_visited.insert(k);
-                    path.push(k);
+                for k in all_nodes.iter() {
+                    let index = curr_node * gate_count + k;
+                    if undirected_graph[index] {
+                        nodes_visited.insert(*k);
+                        stack.push(*k);
+                    }
                 }
+                nodes_visited.insert(curr_node);
+                all_nodes.remove(&curr_node);
             }
             None => {
                 is_weakly_connected = false;
@@ -358,8 +362,7 @@ where
 
             if funtionally_equivalent && WC {
                 let collisions_set = circuit_to_collision_sets(&random_circuit);
-                let is_weakly_connected =
-                    is_collisions_set_weakly_connected(&collisions_set, ell_in);
+                let is_weakly_connected = is_collisions_set_weakly_connected(&collisions_set);
                 funtionally_equivalent = is_weakly_connected;
             }
 
@@ -574,7 +577,7 @@ fn circuit_to_collision_sets<G: Gate>(circuit: &Circuit<G>) -> Vec<HashSet<usize
 
 fn circuit_to_skeleton_graph<G: Gate>(circuit: &Circuit<G>) -> Graph<usize, usize> {
     let all_collision_sets = circuit_to_collision_sets(circuit);
-    println!("Collision sets: {:?}", all_collision_sets);
+
     let mut skeleton = Graph::<usize, usize>::new();
     // add nodes with weights as ids
     let nodes = circuit
@@ -622,6 +625,7 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
         find_convex_subcircuit(&skeleton_graph, ell_out, max_convex_iterations, rng);
 
     assert!(convex_subset.len() == ell_out);
+    assert!(ell_out <= ell_in);
 
     println!("Convex subset: {:?}", &convex_subset);
 
@@ -812,6 +816,33 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
         successor_collisions.insert(successor, collides_with);
     }
 
+    // For each node in outsider (ie not a predecessor nor a successor) that collides with some gate in C^in, randomly sample boolean value.
+    // If true make it a predecessor else make it a successor. Since C^in has more gates than C^out there are chances that an outsider may
+    // collide with some gate in C^in.
+    // FIXME(Jay): At the moment we make outsiders prdecessors. Change this to random toss
+    let mut outsider_collisiions = HashMap::new();
+    for outsider in c_out_outsiders {
+        let mut collides_with = HashSet::new();
+        let out_gate = gate_map
+            .get(skeleton_graph.node_weight(outsider).unwrap())
+            .unwrap();
+        for (index, c_in_gate) in c_in.gates.iter().enumerate() {
+            if out_gate.check_collision(c_in_gate) {
+                let mut larger_collides_smaller = false;
+                for smaller_index in collides_with.iter() {
+                    let s: &HashSet<usize> = &collision_sets_c_in[*smaller_index];
+                    if s.contains(&index) {
+                        larger_collides_smaller = true;
+                    }
+                }
+                if !larger_collides_smaller {
+                    collides_with.insert(index);
+                }
+            }
+        }
+        outsider_collisiions.insert(outsider, collides_with);
+    }
+
     // Update the skeleton graph
 
     // Add nodes/gates in C^in to skeleton graph and gate dictionary
@@ -848,40 +879,27 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
         }
     }
 
-    // println!("## Before ###");
-    // for node in skeleton_graph.node_indices() {
-    //     println!(
-    //         "Node {:?} with weight {:?}",
-    //         &node,
-    //         skeleton_graph.node_weight(node)
-    //     );
-    // }
+    // Edges from outsiders
+    for (outsider, cin_indices) in outsider_collisiions {
+        for index in cin_indices {
+            skeleton_graph.add_edge(outsider, c_in_nodes[index], Default::default());
+        }
+    }
 
     // Index of removed node is take over by the node that has the last index. Here we remove \ell^out nodes.
-    // As long as \ell^out < \ell^in (notice that C^in gates are added before removing gates of C^out) none of
+    // As long as \ell^out <= \ell^in (notice that C^in gates are added before removing gates of C^out) none of
     // pre-existing nodes we replace the removed node and hence we wouldn't incorrectly delete some node.
     for node in convex_subset {
         gate_map
             .remove(&skeleton_graph.remove_node(node).unwrap())
             .unwrap();
     }
-
-    // println!("## After ###");
-    // for node in skeleton_graph.node_indices() {
-    //     println!(
-    //         "Node {:?} with weight {:?}",
-    //         &node,
-    //         skeleton_graph.node_weight(node)
-    //     );
-    // }
-    // convex_subset.
-    // Remove nodes in C^out
 }
 
 #[cfg(test)]
 mod tests {
     use petgraph::{
-        algo::{all_simple_paths, toposort},
+        algo::{all_simple_paths, connected_components, toposort},
         dot::{Config, Dot},
     };
     use rand::SeedableRng;
@@ -890,7 +908,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trial() {
+    fn test_local_mixing() {
         let gates = 20;
         let n = 8;
         let mut rng = ChaCha8Rng::from_seed([1u8; 32]);
@@ -912,7 +930,7 @@ mod tests {
         let max_convex_iterations = 1000usize;
         let max_replacement_iterations = 100000000usize;
 
-        for _ in 0..2 {
+        for _ in 0..10 {
             println!(
                 "Topological order before local mixing: {:?}",
                 &top_sorted_nodes
@@ -991,6 +1009,19 @@ mod tests {
         }
     }
 
+    // #[test]
+    // fn trial() {
+    //     let n = 3;
+    //     let ell_out = 2;
+    //     let ell_in = 5;
+    //     let mut rng = thread_rng();
+    //     let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(ell_out, n, 1.0, &mut rng);
+    //     let circuit1 = find_replacement_circuit::<2, true, _, _>(
+    //         &circuit, ell_in, n, 1.0, 100000000, &mut rng,
+    //     )
+    //     .unwrap();
+    // }
+
     #[test]
     fn test_dfs() {
         let gates = 50;
@@ -1041,6 +1072,23 @@ mod tests {
         }
     }
 
-    //TODO: Add test for is_weakly_connected_circuit
-    // FAILS for: C_IN collision sets: [{2}, {}, {3, 4}, {}, {}]
+    #[test]
+    fn test_is_weakly_connected() {
+        let n = 5;
+        let gates = 5;
+        let mut rng = thread_rng();
+        for _ in 0..10000 {
+            let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
+            let graph = circuit_to_skeleton_graph(&circuit);
+
+            let collisions_sets = circuit_to_collision_sets(&circuit);
+            let is_wc = is_collisions_set_weakly_connected(&collisions_sets);
+            let expected_wc = connected_components(&graph) == 1;
+            assert_eq!(
+                is_wc, expected_wc,
+                "Expected {expected_wc} but got {is_wc} for collisions sets {:?}",
+                collisions_sets
+            );
+        }
+    }
 }
