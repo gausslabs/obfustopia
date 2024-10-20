@@ -1,4 +1,5 @@
 use itertools::Itertools;
+use ndarray::Array2;
 use num_traits::Zero;
 use petgraph::{
     graph::{self, NodeIndex},
@@ -10,7 +11,10 @@ use rand::{
     distributions::{uniform::SampleUniform, Uniform},
     thread_rng, Rng, RngCore,
 };
-use sha2::{digest::typenum::bit, Digest, Sha256};
+use sha2::{
+    digest::{consts::True, typenum::bit},
+    Digest, Sha256,
+};
 use std::{
     cell::Cell,
     char::MAX,
@@ -127,19 +131,23 @@ fn input_value_to_bitstring_map(n: usize) -> HashMap<usize, Vec<bool>> {
 fn sample_m_unique_values<const M: usize, D, R: RngCore>(
     rng: &mut R,
     distribution: &Uniform<D>,
-) -> [D; M]
+) -> HashSet<D>
 where
     D: SampleUniform + Eq + Hash + Copy + Zero,
 {
     // Note(Jay): I removed the hash set way because iterator over hashset is in random order which is not good if we want to debug with a seeded rng.
-    let mut values = [D::zero(); M];
-    let mut i = 0;
-    while i < M {
+    let mut values = HashSet::new();
+    // let mut i = 0;
+    // while i < M {
+    //     let sample = rng.sample(distribution);
+    //     if !values.contains(&sample) {
+    //         values[i] = sample;
+    //     }
+    //     i += 1;
+    // }
+    while values.len() < M {
         let sample = rng.sample(distribution);
-        if !values.contains(&sample) {
-            values[i] = sample;
-        }
-        i += 1;
+        values.insert(sample);
     }
     return values;
 }
@@ -267,7 +275,49 @@ where
     (Circuit { gates, n: n.into() }, sample_trace)
 }
 
-fn find_replacement_circuit<const MAX_K: usize, D, R: RngCore>(
+/// Checks whether collisions set of any circuit is weakly connected.
+///
+/// Any directed graph is weakly connected if the underlying undirected graph is fully connected.
+fn is_collisions_set_weakly_connected(
+    collisions_set: &[HashSet<usize>],
+    gate_count: usize,
+) -> bool {
+    // row major matrix
+    let mut undirected_graph = vec![false; gate_count * gate_count];
+    for (i, set_i) in collisions_set.iter().enumerate() {
+        for j in set_i {
+            assert!(i < gate_count);
+            assert!(*j < gate_count, "j={j} n={gate_count}");
+            // graph[i][j] = true
+            // graph[j][i] = true
+            undirected_graph[i * gate_count + j] = true;
+            undirected_graph[j * gate_count + i] = true;
+        }
+    }
+
+    let mut nodes_visited = HashSet::new();
+    let mut path = vec![0];
+    let mut is_weakly_connected = true;
+    while nodes_visited.len() < gate_count {
+        let curr_node = path.pop();
+        match curr_node {
+            Some(curr_node) => {
+                for k in gate_count * curr_node..gate_count * curr_node + gate_count {
+                    nodes_visited.insert(k);
+                    path.push(k);
+                }
+            }
+            None => {
+                is_weakly_connected = false;
+                break;
+            }
+        }
+    }
+
+    is_weakly_connected
+}
+
+fn find_replacement_circuit<const MAX_K: usize, const WC: bool, D, R: RngCore>(
     circuit: &Circuit<BaseGate<MAX_K, D>>,
     ell_in: usize,
     n: D,
@@ -304,6 +354,13 @@ where
                     funtionally_equivalent = false;
                     break;
                 }
+            }
+
+            if funtionally_equivalent && WC {
+                let collisions_set = circuit_to_collision_sets(&random_circuit);
+                let is_weakly_connected =
+                    is_collisions_set_weakly_connected(&collisions_set, ell_in);
+                funtionally_equivalent = is_weakly_connected;
             }
 
             if funtionally_equivalent {
@@ -497,17 +554,19 @@ fn circuit_to_collision_sets<G: Gate>(circuit: &Circuit<G>) -> Vec<HashSet<usize
         all_collision_sets.push(collision_set_i);
     }
 
-    // Remove intsecting collisions. That is i can collide with j iff there is not k between i < k < j with which both i & j collide
+    // Remove intsecting collisions. That is i can collide with j iff there is no k such that i < k < j with which both i & j collide
     for (i, _) in circuit.gates.iter().enumerate() {
-        for (j, gj) in circuit.gates.iter().enumerate().skip(i + 1) {
+        // Don't update collision set i in place. Otherwise situations like the following are missed: Let i collide with j < k < l. '
+        // If i^th collision set is updated in place then k is removed from the set after checking against j^th collision set. And i^th
+        // collision set will never be checked against k. Hence, an incorrect (or say unecessary) dependency will be drawn from i to l.
+        let mut collisions_set_i = all_collision_sets[i].clone();
+        for (j, _) in circuit.gates.iter().enumerate().skip(i + 1) {
             if all_collision_sets[i].contains(&j) {
-                let (first, second) = all_collision_sets.split_at_mut(j);
-                let collisions_set_i = first.last_mut().unwrap();
-                let collisions_set_j = &second.first().unwrap();
                 // remove id k from set of i iff k is in set of j (ie j, where j < k, collides with k)
-                collisions_set_i.retain(|k| !collisions_set_j.contains(k));
+                collisions_set_i.retain(|k| !all_collision_sets[j].contains(k));
             }
         }
+        all_collision_sets[i] = collisions_set_i;
     }
 
     return all_collision_sets;
@@ -515,7 +574,7 @@ fn circuit_to_collision_sets<G: Gate>(circuit: &Circuit<G>) -> Vec<HashSet<usize
 
 fn circuit_to_skeleton_graph<G: Gate>(circuit: &Circuit<G>) -> Graph<usize, usize> {
     let all_collision_sets = circuit_to_collision_sets(circuit);
-
+    println!("Collision sets: {:?}", all_collision_sets);
     let mut skeleton = Graph::<usize, usize>::new();
     // add nodes with weights as ids
     let nodes = circuit
@@ -564,7 +623,7 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
 
     assert!(convex_subset.len() == ell_out);
 
-    dbg!(&convex_subset);
+    println!("Convex subset: {:?}", &convex_subset);
 
     // Convex subset sorted in topological order
     let convex_subgraph_top_sorted_gate_ids = top_sorted_nodes
@@ -600,7 +659,7 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
             new_controls[1] = *old_to_new_map.get(&old_controls[1]).unwrap();
             BaseGate {
                 id: index,
-                target: old_to_new_map[&gate.target()],
+                target: *old_to_new_map.get(&gate.target()).unwrap(),
                 control_func: gate.control_func.clone(),
                 controls: new_controls,
             }
@@ -611,7 +670,7 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
     println!("###### C_OUT ######");
     print_circuit_with_base_gates(&c_out);
 
-    let c_in_dash = find_replacement_circuit::<MAX_K, D, _>(
+    let c_in_dash = find_replacement_circuit::<MAX_K, true, D, _>(
         &c_out,
         ell_in,
         D::try_from(c_out.n).unwrap(),
@@ -624,6 +683,7 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
     print_circuit_with_base_gates(&c_in_dash);
 
     let collision_sets_c_in = circuit_to_collision_sets(&c_in_dash);
+    println!("C_IN collision sets: {:?}", &collision_sets_c_in);
     let c_in = Circuit::new(
         c_in_dash
             .gates
@@ -640,10 +700,7 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
                     id: *latest_id,
                     target: *new_to_old_map.get(&g.target()).unwrap(),
                     controls: old_controls,
-                    // FIXME: Here we assume the there's only one type of control function. But ideally we should not and we shouldn't be defininf control function here.
-                    control_func: (|controls, inputs| {
-                        inputs[controls[0].into()] & inputs[controls[1].into()]
-                    }),
+                    control_func: g.control_func.clone(),
                 }
             })
             .collect(),
@@ -691,6 +748,22 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
     }
     assert!(c_out_all_pedecessors.is_disjoint(&c_out_all_successors));
 
+    let mut c_out_outsiders = HashSet::new();
+    for node in skeleton_graph.node_indices() {
+        if !c_out_all_pedecessors.contains(&node) && !c_out_all_successors.contains(&node) {
+            c_out_outsiders.insert(node);
+        }
+    }
+
+    for node in convex_subset.iter() {
+        c_out_all_pedecessors.remove(node);
+        c_out_all_successors.remove(node);
+    }
+
+    println!("C^out predecessors: {:?}", &c_out_all_pedecessors);
+    println!("C^out successors: {:?}", &c_out_all_successors);
+    println!("C^out outsiders: {:?}", &c_out_outsiders);
+
     // For each predecessor find all first gates among all dependency chains in C^in with which it collides and draw an outgoing edge to the gates.
     let mut predecessor_collisions = HashMap::new();
     for predecessor in c_out_all_pedecessors {
@@ -703,7 +776,7 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
                 let mut larger_collides_smaller = false;
                 for smaller_index in collides_with.iter() {
                     let s: &HashSet<usize> = &collision_sets_c_in[*smaller_index];
-                    if !(s.contains(&index)) {
+                    if s.contains(&index) {
                         larger_collides_smaller = true;
                     }
                 }
@@ -727,7 +800,7 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
                 let mut smaller_collides_larger = false;
                 for larger_index in collides_with.iter() {
                     let s: &HashSet<usize> = &collision_sets_c_in[index];
-                    if !(s.contains(&larger_index)) {
+                    if s.contains(&larger_index) {
                         smaller_collides_larger = true;
                     }
                 }
@@ -751,27 +824,58 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
             node
         })
         .collect_vec();
-    dbg!(&c_in_nodes);
+    println!("C^in nodes: {:?}", &c_in_nodes);
 
     // Add new dependency edges
+    // Edges within C_IN
+    for (i, set_i) in collision_sets_c_in.iter().enumerate() {
+        for j in set_i {
+            skeleton_graph.add_edge(c_in_nodes[i], c_in_nodes[*j], Default::default());
+        }
+    }
+
+    // Edges from predecessors
     for (pred, cin_indices) in predecessor_collisions {
         for index in cin_indices {
             skeleton_graph.add_edge(pred, c_in_nodes[index], Default::default());
         }
     }
+
+    // Edges to successors
     for (succ, cin_indices) in successor_collisions {
         for index in cin_indices {
             skeleton_graph.add_edge(c_in_nodes[index], succ, Default::default());
         }
     }
 
-    // Remove nodes in C^out
-    for node in convex_subset {
-        let node_weights = skeleton_graph.remove_node(node).unwrap();
-        println!("Node weights : {}", node_weights,);
+    // println!("## Before ###");
+    // for node in skeleton_graph.node_indices() {
+    //     println!(
+    //         "Node {:?} with weight {:?}",
+    //         &node,
+    //         skeleton_graph.node_weight(node)
+    //     );
+    // }
 
-        gate_map.remove(&node_weights).unwrap();
+    // Index of removed node is take over by the node that has the last index. Here we remove \ell^out nodes.
+    // As long as \ell^out < \ell^in (notice that C^in gates are added before removing gates of C^out) none of
+    // pre-existing nodes we replace the removed node and hence we wouldn't incorrectly delete some node.
+    for node in convex_subset {
+        gate_map
+            .remove(&skeleton_graph.remove_node(node).unwrap())
+            .unwrap();
     }
+
+    // println!("## After ###");
+    // for node in skeleton_graph.node_indices() {
+    //     println!(
+    //         "Node {:?} with weight {:?}",
+    //         &node,
+    //         skeleton_graph.node_weight(node)
+    //     );
+    // }
+    // convex_subset.
+    // Remove nodes in C^out
 }
 
 #[cfg(test)]
@@ -789,7 +893,8 @@ mod tests {
     fn trial() {
         let gates = 20;
         let n = 8;
-        let mut rng = ChaCha8Rng::from_seed([0u8; 32]);
+        let mut rng = ChaCha8Rng::from_seed([1u8; 32]);
+        let mut rng = thread_rng();
         let (original_circuit, _) =
             sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
 
@@ -807,45 +912,55 @@ mod tests {
         let max_convex_iterations = 1000usize;
         let max_replacement_iterations = 100000000usize;
 
-        // local_mixing_step::<2, _, _>(
-        //     &mut skeleton_graph,
-        //     ell_in,
-        //     ell_out,
-        //     n,
-        //     1.0,
-        //     &mut gate_map,
-        //     &top_sorted_nodes,
-        //     &mut latest_id,
-        //     max_replacement_iterations,
-        //     max_convex_iterations,
-        //     &mut rng,
-        // );
+        for _ in 0..2 {
+            println!(
+                "Topological order before local mixing: {:?}",
+                &top_sorted_nodes
+            );
 
-        let original_graph = circuit_to_skeleton_graph(&original_circuit);
-        let original_circuit_graphviz = Dot::with_config(
-            &original_graph,
-            &[Config::EdgeNoLabel, Config::NodeIndexLabel],
-        );
-        let mixed_circuit_graphviz = Dot::with_config(
-            &skeleton_graph,
-            &[Config::EdgeNoLabel, Config::NodeIndexLabel],
-        );
+            local_mixing_step::<2, _, _>(
+                &mut skeleton_graph,
+                ell_in,
+                ell_out,
+                n,
+                1.0,
+                &mut gate_map,
+                &top_sorted_nodes,
+                &mut latest_id,
+                max_replacement_iterations,
+                max_convex_iterations,
+                &mut rng,
+            );
 
-        // println!("Original circuit: {:?}", original_circuit_graphviz);
-        // println!("Mixed circuit: {:?}", mixed_circuit_graphviz);
+            let original_graph = circuit_to_skeleton_graph(&original_circuit);
+            let original_circuit_graphviz = Dot::with_config(
+                &original_graph,
+                &[Config::EdgeNoLabel, Config::NodeIndexLabel],
+            );
+            let mixed_circuit_graphviz = Dot::with_config(
+                &skeleton_graph,
+                &[Config::EdgeNoLabel, Config::NodeIndexLabel],
+            );
 
-        // println!(skeleton_graph.)
-        let top_sort_res = toposort(&skeleton_graph, None);
-        match top_sort_res {
-            Result::Ok(v) => {
-                top_sorted_nodes = v;
+            println!("Original circuit: {:?}", original_circuit_graphviz);
+            println!("Mixed circuit: {:?}", mixed_circuit_graphviz);
+
+            // println!(skeleton_graph.)
+            let top_sort_res = toposort(&skeleton_graph, None);
+            match top_sort_res {
+                Result::Ok(v) => {
+                    top_sorted_nodes = v;
+                }
+                Err(e) => {
+                    assert!(false);
+                }
             }
-            Err(e) => {
-                assert!(false);
-            }
+
+            println!(
+                "Topological order after local mixing: {:?}",
+                &top_sorted_nodes
+            );
         }
-
-        println!("Top sort after local mixing: {:?}", &top_sorted_nodes);
 
         let mixed_circuit = Circuit::new(
             top_sorted_nodes
@@ -925,4 +1040,7 @@ mod tests {
             assert_eq!(visited_with_path, expected_visited_nodes);
         }
     }
+
+    //TODO: Add test for is_weakly_connected_circuit
+    // FAILS for: C_IN collision sets: [{2}, {}, {3, 4}, {}, {}]
 }
