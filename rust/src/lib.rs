@@ -1,29 +1,23 @@
 use itertools::Itertools;
-use ndarray::Array2;
 use num_traits::Zero;
 use petgraph::{
-    graph::{self, NodeIndex},
-    visit::{EdgeRef, IntoNeighborsDirected, NodeRef},
+    graph::NodeIndex,
+    visit::EdgeRef,
     Direction::{self, Outgoing},
     Graph,
 };
 use rand::{
     distributions::{uniform::SampleUniform, Uniform},
-    thread_rng, Rng, RngCore,
+    Rng, RngCore,
 };
-use sha2::{
-    digest::{consts::True, typenum::bit},
-    Digest, Sha256,
-};
+use sha2::{Digest, Sha256};
 use std::{
-    cell::Cell,
-    char::MAX,
     collections::{HashMap, HashSet},
     fmt::{Debug, Display},
     hash::Hash,
 };
 
-trait Gate {
+pub trait Gate {
     type Input: ?Sized;
     type Target;
     type Controls;
@@ -36,7 +30,7 @@ trait Gate {
 }
 
 #[derive(Clone)]
-struct BaseGate<const N: usize, D> {
+pub struct BaseGate<const N: usize, D> {
     id: usize,
     target: D,
     controls: [D; N],
@@ -74,7 +68,7 @@ where
     }
 }
 
-struct Circuit<G> {
+pub struct Circuit<G> {
     gates: Vec<G>,
     n: usize,
 }
@@ -83,11 +77,11 @@ impl<G> Circuit<G>
 where
     G: Gate<Input = [bool]>,
 {
-    fn new(gates: Vec<G>, n: usize) -> Self {
+    pub fn new(gates: Vec<G>, n: usize) -> Self {
         Circuit { gates, n }
     }
 
-    fn run(&self, inputs: &mut [bool]) {
+    pub fn run(&self, inputs: &mut [bool]) {
         self.gates.iter().for_each(|g| {
             g.run(inputs);
         });
@@ -98,7 +92,7 @@ impl<G> Circuit<G>
 where
     G: Clone,
 {
-    fn split_circuit(&self, at_gate: usize) -> (Circuit<G>, Circuit<G>) {
+    pub fn split_circuit(&self, at_gate: usize) -> (Circuit<G>, Circuit<G>) {
         assert!(at_gate < self.gates.len());
         let mut first_gates = self.gates.clone();
         let second_gates = first_gates.split_off(at_gate);
@@ -112,6 +106,46 @@ where
                 n: self.n,
             },
         )
+    }
+}
+
+impl<const N: usize, D> Display for Circuit<BaseGate<N, D>>
+where
+    D: Into<usize> + Copy + PartialEq,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f)?;
+        writeln!(f, "{:-<15}", "")?;
+        for i in 0..self.n {
+            write!(f, "{:2}", i)?;
+        }
+        writeln!(f)?;
+
+        writeln!(f, "{:-<15}", "")?;
+
+        // Print 20 rows of values from 0 to 10
+        for g in self.gates.iter() {
+            write!(f, "{:1}", "")?;
+            for j in 0..self.n {
+                let controls = g
+                    .controls()
+                    .iter()
+                    .map(|v| (*v).into())
+                    .collect::<Vec<usize>>();
+                if g.target().into() == j {
+                    write!(f, "{:2}", "O")?;
+                } else if controls.contains(&j) {
+                    write!(f, "{:2}", "I")?;
+                } else {
+                    write!(f, "{:2}", "x")?;
+                }
+            }
+            writeln!(f)?;
+        }
+
+        writeln!(f, "{:-<15}", "")?;
+        writeln!(f)?;
+        Ok(())
     }
 }
 
@@ -379,69 +413,15 @@ where
         // }
     }
 
-    let mut visited_freq = vec![0; 1000];
-    visited_circuits.iter().for_each(|(_k, v)| {
-        visited_freq[*v] += 1;
-    });
+    // let mut visited_freq = vec![0; 1000];
+    // visited_circuits.iter().for_each(|(_k, v)| {
+    //     visited_freq[*v] += 1;
+    // });
 
-    println!("Iteration count: {}", curr_iter);
-    println!("Visited frequency: {:?}", visited_freq);
+    log::info!("Finding replacement total iterations: {}", curr_iter);
+    // println!("Visited frequency: {:?}", visited_freq);
 
     return replacement_circuit;
-}
-
-fn print_permutation_map<G>(circuit: &Circuit<G>)
-where
-    G: Gate<Input = [bool]>,
-{
-    let permutation_map = permutation_map(circuit, &input_value_to_bitstring_map(circuit.n));
-    let mut output = vec![];
-    for input_v in 0..1usize << circuit.n {
-        let bitstring = permutation_map.get(&input_v).unwrap();
-        let mut output_v = 0usize;
-        for i in 0..circuit.n {
-            output_v += ((bitstring[i]) as usize) << i;
-        }
-        output.push((input_v, output_v));
-    }
-    println!("{:?}", output);
-}
-
-fn print_circuit_with_base_gates<const N: usize, D>(circuit: &Circuit<BaseGate<N, D>>)
-where
-    D: Into<usize> + Copy + PartialEq,
-{
-    println!();
-    println!("{:-<15}", "");
-    for i in 0..circuit.n {
-        print!("{:2}", i);
-    }
-    println!();
-
-    println!("{:-<15}", "");
-
-    // Print 20 rows of values from 0 to 10
-    for g in circuit.gates.iter() {
-        print!("{:1}", "");
-        for j in 0..circuit.n {
-            let controls = g
-                .controls()
-                .iter()
-                .map(|v| (*v).into())
-                .collect::<Vec<usize>>();
-            if g.target().into() == j {
-                print!("{:2}", "O");
-            } else if controls.contains(&j) {
-                print!("{:2}", "I");
-            } else {
-                print!("{:2}", "x");
-            }
-        }
-        println!();
-    }
-
-    println!("{:-<15}", "");
-    println!();
 }
 
 fn dfs(
@@ -476,73 +456,86 @@ fn find_convex_subcircuit<R: RngCore>(
     ell_out: usize,
     max_iterations: usize,
     rng: &mut R,
-) -> HashSet<NodeIndex> {
-    // find a random source
-    // find the unexplored candidate set
-    //
+) -> Option<HashSet<NodeIndex>> {
+    let mut curr_iter = 0;
 
-    let start_node = NodeIndex::from(rng.gen_range(0..graph.node_count()) as u32);
+    let mut final_convex_set = None;
+    while curr_iter < max_iterations {
+        let convex_set = {
+            let start_node = NodeIndex::from(rng.gen_range(0..graph.node_count()) as u32);
 
-    let mut explored_candidates = HashSet::new();
-    let mut unexplored_candidates = vec![];
-    // TODO: Why does this always has to outgoing?
-    for outgoing in graph.neighbors_directed(start_node, Outgoing) {
-        unexplored_candidates.push(outgoing);
-    }
-
-    let mut convex_set = HashSet::new();
-    convex_set.insert(start_node);
-
-    while convex_set.len() < ell_out {
-        let candidate = unexplored_candidates.pop();
-
-        if candidate.is_none() {
-            break;
-        }
-
-        let mut union_vertices_visited_with_path = HashSet::new();
-        let mut union_vertices_visited = HashSet::new();
-        let mut path = vec![];
-        union_vertices_visited_with_path.insert(candidate.unwrap());
-        for source in convex_set.iter() {
-            dfs(
-                source.clone(),
-                &mut union_vertices_visited_with_path,
-                &mut union_vertices_visited,
-                &mut path,
-                graph,
-                Direction::Outgoing,
-            );
-        }
-
-        // Remove nodes in the exisiting convex set. The resulting set contains nodes that when added to convex set the set still remains convex.
-        union_vertices_visited_with_path.retain(|node| !convex_set.contains(node));
-
-        if union_vertices_visited_with_path.len() + convex_set.len() <= ell_out {
-            union_vertices_visited_with_path.iter().for_each(|node| {
-                convex_set.insert(node.clone());
-            });
-
-            if convex_set.len() < ell_out {
-                // more exploration to do
-                union_vertices_visited_with_path
-                    .into_iter()
-                    .for_each(|node| {
-                        // add more candidates to explore
-                        for outgoing in graph.neighbors_directed(node, Outgoing) {
-                            if !explored_candidates.contains(&outgoing) {
-                                unexplored_candidates.push(outgoing);
-                            }
-                        }
-                    });
-                explored_candidates.insert(candidate.unwrap());
+            let mut explored_candidates = HashSet::new();
+            let mut unexplored_candidates = vec![];
+            // TODO: Why does this always has to outgoing?
+            for outgoing in graph.neighbors_directed(start_node, Outgoing) {
+                unexplored_candidates.push(outgoing);
             }
+
+            let mut convex_set = HashSet::new();
+            convex_set.insert(start_node);
+
+            while convex_set.len() < ell_out {
+                let candidate = unexplored_candidates.pop();
+
+                if candidate.is_none() {
+                    break;
+                }
+
+                let mut union_vertices_visited_with_path = HashSet::new();
+                let mut union_vertices_visited = HashSet::new();
+                let mut path = vec![];
+                union_vertices_visited_with_path.insert(candidate.unwrap());
+                for source in convex_set.iter() {
+                    dfs(
+                        source.clone(),
+                        &mut union_vertices_visited_with_path,
+                        &mut union_vertices_visited,
+                        &mut path,
+                        graph,
+                        Direction::Outgoing,
+                    );
+                }
+
+                // Remove nodes in the exisiting convex set. The resulting set contains nodes that when added to convex set the set still remains convex.
+                union_vertices_visited_with_path.retain(|node| !convex_set.contains(node));
+
+                if union_vertices_visited_with_path.len() + convex_set.len() <= ell_out {
+                    union_vertices_visited_with_path.iter().for_each(|node| {
+                        convex_set.insert(node.clone());
+                    });
+
+                    if convex_set.len() < ell_out {
+                        // more exploration to do
+                        union_vertices_visited_with_path
+                            .into_iter()
+                            .for_each(|node| {
+                                // add more candidates to explore
+                                for outgoing in graph.neighbors_directed(node, Outgoing) {
+                                    if !explored_candidates.contains(&outgoing) {
+                                        unexplored_candidates.push(outgoing);
+                                    }
+                                }
+                            });
+                        explored_candidates.insert(candidate.unwrap());
+                    }
+                } else {
+                    explored_candidates.insert(candidate.unwrap());
+                }
+            }
+            convex_set
+        };
+
+        if convex_set.len() == ell_out {
+            final_convex_set = Some(convex_set);
+            break;
         } else {
-            explored_candidates.insert(candidate.unwrap());
+            curr_iter += 1;
         }
     }
 
-    return convex_set;
+    log::info!("Find convex subcircuit iterations: {curr_iter}");
+
+    return final_convex_set;
 }
 
 fn circuit_to_collision_sets<G: Gate>(circuit: &Circuit<G>) -> Vec<HashSet<usize>> {
@@ -575,7 +568,7 @@ fn circuit_to_collision_sets<G: Gate>(circuit: &Circuit<G>) -> Vec<HashSet<usize
     return all_collision_sets;
 }
 
-fn circuit_to_skeleton_graph<G: Gate>(circuit: &Circuit<G>) -> Graph<usize, usize> {
+pub fn circuit_to_skeleton_graph<G: Gate>(circuit: &Circuit<G>) -> Graph<usize, usize> {
     let all_collision_sets = circuit_to_collision_sets(circuit);
 
     let mut skeleton = Graph::<usize, usize>::new();
@@ -596,7 +589,12 @@ fn circuit_to_skeleton_graph<G: Gate>(circuit: &Circuit<G>) -> Graph<usize, usiz
     return skeleton;
 }
 
-fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
+/// Local mixing step
+///
+/// Returns false if mixing step is not successuful which may happen if one of the following is true
+/// - Elements in convex subset < \ell^out
+/// - \omega^out <= 3
+pub fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
     skeleton_graph: &mut Graph<usize, usize>,
     ell_in: usize,
     ell_out: usize,
@@ -608,7 +606,8 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
     max_replacement_iterations: usize,
     max_convex_iterations: usize,
     rng: &mut R,
-) where
+) -> bool
+where
     D: Into<usize>
         + TryFrom<usize>
         + PartialEq
@@ -621,13 +620,15 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
         + Debug,
     <D as TryFrom<usize>>::Error: Debug,
 {
-    let convex_subset =
-        find_convex_subcircuit(&skeleton_graph, ell_out, max_convex_iterations, rng);
-
-    assert!(convex_subset.len() == ell_out);
     assert!(ell_out <= ell_in);
 
-    println!("Convex subset: {:?}", &convex_subset);
+    let convex_subset =
+        match find_convex_subcircuit(&skeleton_graph, ell_out, max_convex_iterations, rng) {
+            Some(convex_subset) => convex_subset,
+            None => return false,
+        };
+
+    log::info!("Convex subset: {:?}", &convex_subset);
 
     // Convex subset sorted in topological order
     let convex_subgraph_top_sorted_gate_ids = top_sorted_nodes
@@ -645,6 +646,11 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
             omega_out.insert(*wire);
         }
     });
+
+    // return false if omega^out <= 3 because finding a replacement is apparently not possilbe.
+    if omega_out.len() <= 3 {
+        return false;
+    }
 
     // Map from old wires to new wires in C^out
     let mut old_to_new_map = HashMap::new();
@@ -671,8 +677,7 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
         .collect_vec();
 
     let c_out = Circuit::new(c_out_gates, omega_out.len());
-    println!("###### C_OUT ######");
-    print_circuit_with_base_gates(&c_out);
+    log::info!("@@@@ C^out @@@@ {}", &c_out);
 
     let c_in_dash = find_replacement_circuit::<MAX_K, true, D, _>(
         &c_out,
@@ -683,11 +688,10 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
         rng,
     )
     .unwrap();
-    println!("###### C_IN ######");
-    print_circuit_with_base_gates(&c_in_dash);
+    log::info!("@@@@ C^in @@@@ {}", &c_in_dash);
 
     let collision_sets_c_in = circuit_to_collision_sets(&c_in_dash);
-    println!("C_IN collision sets: {:?}", &collision_sets_c_in);
+    log::info!("C^in collision sets: {:?}", &collision_sets_c_in);
     let c_in = Circuit::new(
         c_in_dash
             .gates
@@ -764,9 +768,9 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
         c_out_all_successors.remove(node);
     }
 
-    println!("C^out predecessors: {:?}", &c_out_all_pedecessors);
-    println!("C^out successors: {:?}", &c_out_all_successors);
-    println!("C^out outsiders: {:?}", &c_out_outsiders);
+    log::info!("C^out predecessors: {:?}", &c_out_all_pedecessors);
+    log::info!("C^out successors: {:?}", &c_out_all_successors);
+    log::info!("C^out outsiders: {:?}", &c_out_outsiders);
 
     // For each predecessor find all first gates among all dependency chains in C^in with which it collides and draw an outgoing edge to the gates.
     let mut predecessor_collisions = HashMap::new();
@@ -855,7 +859,8 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
             node
         })
         .collect_vec();
-    println!("C^in nodes: {:?}", &c_in_nodes);
+
+    log::info!("C^in nodes: {:?}", &c_in_nodes);
 
     // Add new dependency edges
     // Edges within C_IN
@@ -894,25 +899,25 @@ fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
             .remove(&skeleton_graph.remove_node(node).unwrap())
             .unwrap();
     }
+
+    return true;
 }
 
 #[cfg(test)]
 mod tests {
-    use petgraph::{
-        algo::{all_simple_paths, connected_components, toposort},
-        dot::{Config, Dot},
-    };
-    use rand::SeedableRng;
+    use petgraph::algo::{all_simple_paths, connected_components, toposort};
+    use rand::{thread_rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
     use super::*;
 
     #[test]
     fn test_local_mixing() {
+        env_logger::init();
+
         let gates = 20;
         let n = 8;
         let mut rng = ChaCha8Rng::from_seed([1u8; 32]);
-        let mut rng = thread_rng();
         let (original_circuit, _) =
             sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
 
@@ -930,13 +935,17 @@ mod tests {
         let max_convex_iterations = 1000usize;
         let max_replacement_iterations = 100000000usize;
 
-        for _ in 0..10 {
-            println!(
-                "Topological order before local mixing: {:?}",
+        let mut mixing_steps = 0;
+        let total_mixing_steps = 100;
+
+        while mixing_steps < total_mixing_steps {
+            log::info!("#### Mixing step {mixing_steps} ####");
+            log::info!(
+                "Topological order before local mixing iteration: {:?}",
                 &top_sorted_nodes
             );
 
-            local_mixing_step::<2, _, _>(
+            let success = local_mixing_step::<2, _, _>(
                 &mut skeleton_graph,
                 ell_in,
                 ell_out,
@@ -950,32 +959,38 @@ mod tests {
                 &mut rng,
             );
 
-            let original_graph = circuit_to_skeleton_graph(&original_circuit);
-            let original_circuit_graphviz = Dot::with_config(
-                &original_graph,
-                &[Config::EdgeNoLabel, Config::NodeIndexLabel],
-            );
-            let mixed_circuit_graphviz = Dot::with_config(
-                &skeleton_graph,
-                &[Config::EdgeNoLabel, Config::NodeIndexLabel],
-            );
+            log::info!("local mixing step {mixing_steps} returned {success}");
 
-            println!("Original circuit: {:?}", original_circuit_graphviz);
-            println!("Mixed circuit: {:?}", mixed_circuit_graphviz);
+            if success {
+                // let original_graph = circuit_to_skeleton_graph(&original_circuit);
+                // let original_circuit_graphviz = Dot::with_config(
+                //     &original_graph,
+                //     &[Config::EdgeNoLabel, Config::NodeIndexLabel],
+                // );
+                // let mixed_circuit_graphviz = Dot::with_config(
+                //     &skeleton_graph,
+                //     &[Config::EdgeNoLabel, Config::NodeIndexLabel],
+                // );
 
-            // println!(skeleton_graph.)
-            let top_sort_res = toposort(&skeleton_graph, None);
-            match top_sort_res {
-                Result::Ok(v) => {
-                    top_sorted_nodes = v;
+                // println!("Original circuit: {:?}", original_circuit_graphviz);
+                // println!("Mixed circuit: {:?}", mixed_circuit_graphviz);
+
+                let top_sort_res = toposort(&skeleton_graph, None);
+                match top_sort_res {
+                    Result::Ok(v) => {
+                        top_sorted_nodes = v;
+                    }
+                    Err(_) => {
+                        log::error!("Cycle detected!");
+                        assert!(false);
+                    }
                 }
-                Err(e) => {
-                    assert!(false);
-                }
+
+                mixing_steps += 1;
             }
 
-            println!(
-                "Topological order after local mixing: {:?}",
+            log::info!(
+                "Topological order after local mixing iteration: {:?}",
                 &top_sorted_nodes
             );
         }
@@ -1008,19 +1023,6 @@ mod tests {
             assert_eq!(inputs0, inputs1);
         }
     }
-
-    // #[test]
-    // fn trial() {
-    //     let n = 3;
-    //     let ell_out = 2;
-    //     let ell_in = 5;
-    //     let mut rng = thread_rng();
-    //     let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(ell_out, n, 1.0, &mut rng);
-    //     let circuit1 = find_replacement_circuit::<2, true, _, _>(
-    //         &circuit, ell_in, n, 1.0, 100000000, &mut rng,
-    //     )
-    //     .unwrap();
-    // }
 
     #[test]
     fn test_dfs() {
