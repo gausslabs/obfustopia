@@ -1,4 +1,4 @@
-use itertools::Itertools;
+use itertools::{izip, Itertools};
 use num_traits::Zero;
 use petgraph::{
     graph::NodeIndex,
@@ -77,10 +77,6 @@ impl<G> Circuit<G>
 where
     G: Gate<Input = [bool]>,
 {
-    pub fn new(gates: Vec<G>, n: usize) -> Self {
-        Circuit { gates, n }
-    }
-
     pub fn run(&self, inputs: &mut [bool]) {
         self.gates.iter().for_each(|g| {
             g.run(inputs);
@@ -106,6 +102,40 @@ where
                 n: self.n,
             },
         )
+    }
+
+    pub fn from_top_sorted_nodes(
+        top_sorted_nodes: &[NodeIndex],
+        skeleton_graph: &Graph<usize, usize>,
+        gate_map: &HashMap<usize, G>,
+        n: usize,
+    ) -> Self {
+        Circuit::new(
+            top_sorted_nodes
+                .iter()
+                .map(|node| {
+                    gate_map
+                        .get(skeleton_graph.node_weight(*node).unwrap())
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect_vec(),
+            n,
+        )
+    }
+}
+
+impl<G> Circuit<G> {
+    pub fn new(gates: Vec<G>, n: usize) -> Self {
+        Circuit { gates, n }
+    }
+
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    pub fn gates(&self) -> &[G] {
+        self.gates.as_ref()
     }
 }
 
@@ -203,7 +233,7 @@ where
     return permutation_map;
 }
 
-fn sample_circuit_with_base_gate<const MAX_K: usize, D, R: RngCore>(
+pub fn sample_circuit_with_base_gate<const MAX_K: usize, D, R: RngCore>(
     gate_count: usize,
     n: D,
     two_prob: f64,
@@ -408,6 +438,10 @@ where
 
         curr_iter += 1;
 
+        if curr_iter % 100000 == 0 {
+            log::info!("[find_replacement_circuit] 100K iterations done");
+        }
+
         // if curr_iter == max_iterations {
         //     replacement_circuit = Some(random_circuit);
         // }
@@ -594,6 +628,7 @@ pub fn circuit_to_skeleton_graph<G: Gate>(circuit: &Circuit<G>) -> Graph<usize, 
 /// Returns false if mixing step is not successuful which may happen if one of the following is true
 /// - Elements in convex subset < \ell^out
 /// - \omega^out <= 3
+/// - Not able to find repalcement circuit after exhausting max_replacement_iterations iterations
 pub fn local_mixing_step<const MAX_K: usize, D, R: RngCore>(
     skeleton_graph: &mut Graph<usize, usize>,
     ell_in: usize,
@@ -676,18 +711,24 @@ where
         })
         .collect_vec();
 
+    log::info!("Old to new wires map: {:?}", &old_to_new_map);
+    log::info!("New to old wires map: {:?}", &new_to_old_map);
+
     let c_out = Circuit::new(c_out_gates, omega_out.len());
     log::info!("@@@@ C^out @@@@ {}", &c_out);
 
-    let c_in_dash = find_replacement_circuit::<MAX_K, true, D, _>(
+    let c_in_dash = match find_replacement_circuit::<MAX_K, true, D, _>(
         &c_out,
         ell_in,
         D::try_from(c_out.n).unwrap(),
         two_prob,
         max_replacement_iterations,
         rng,
-    )
-    .unwrap();
+    ) {
+        Some(c_in_dash) => c_in_dash,
+        None => return false,
+    };
+
     log::info!("@@@@ C^in @@@@ {}", &c_in_dash);
 
     let collision_sets_c_in = circuit_to_collision_sets(&c_in_dash);
@@ -754,7 +795,6 @@ where
             Direction::Outgoing,
         );
     }
-    assert!(c_out_all_pedecessors.is_disjoint(&c_out_all_successors));
 
     let mut c_out_outsiders = HashSet::new();
     for node in skeleton_graph.node_indices() {
@@ -766,7 +806,11 @@ where
     for node in convex_subset.iter() {
         c_out_all_pedecessors.remove(node);
         c_out_all_successors.remove(node);
+        c_out_outsiders.remove(node);
     }
+
+    // Convex subgraph is convex if the set of predecessors and successors are disjoint.
+    assert!(c_out_all_pedecessors.is_disjoint(&c_out_all_successors));
 
     log::info!("C^out predecessors: {:?}", &c_out_all_pedecessors);
     log::info!("C^out successors: {:?}", &c_out_all_successors);
@@ -903,9 +947,47 @@ where
     return true;
 }
 
+pub fn test_circuit_equivalance<G, R: RngCore>(
+    circuit0: &Circuit<G>,
+    circuit1: &Circuit<G>,
+    rng: &mut R,
+) where
+    G: Gate<Input = [bool]>,
+{
+    assert_eq!(circuit0.n, circuit1.n);
+    let n = circuit0.n;
+
+    // for value in rng.sample_iter(Uniform::new(0, 1u128 << n - 1)).take(10000) {
+    for value in 0..1u128 << 15 {
+        let mut inputs = vec![];
+        for i in 0..n {
+            inputs.push((value >> i) & 1u128 == 1);
+        }
+
+        let mut inputs0 = inputs.clone();
+        circuit0.run(&mut inputs0);
+
+        let mut inputs1 = inputs.clone();
+        circuit1.run(&mut inputs1);
+
+        let mut diff_indices = vec![];
+        if inputs0 != inputs1 {
+            izip!(inputs0.iter(), inputs1.iter())
+                .enumerate()
+                .for_each(|(index, (v0, v1))| {
+                    if v0 != v1 {
+                        diff_indices.push(index);
+                    }
+                });
+        }
+
+        assert_eq!(inputs0, inputs1, "Different at indices {:?}", diff_indices);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use petgraph::algo::{all_simple_paths, connected_components, toposort};
+    use petgraph::algo::{all_simple_paths, connected_components, has_path_connecting, toposort};
     use rand::{thread_rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
@@ -917,7 +999,7 @@ mod tests {
 
         let gates = 20;
         let n = 8;
-        let mut rng = ChaCha8Rng::from_seed([1u8; 32]);
+        let mut rng = ChaCha8Rng::from_entropy();
         let (original_circuit, _) =
             sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
 
@@ -930,10 +1012,10 @@ mod tests {
             gate_map.insert(g.id(), g.clone());
         });
 
-        let ell_out = 2;
-        let ell_in = 5;
+        let ell_out = 4;
+        let ell_in = 4;
         let max_convex_iterations = 1000usize;
-        let max_replacement_iterations = 100000000usize;
+        let max_replacement_iterations = 1000000usize;
 
         let mut mixing_steps = 0;
         let total_mixing_steps = 100;
@@ -986,6 +1068,14 @@ mod tests {
                     }
                 }
 
+                let mixed_circuit = Circuit::from_top_sorted_nodes(
+                    &top_sorted_nodes,
+                    &skeleton_graph,
+                    &gate_map,
+                    original_circuit.n(),
+                );
+                test_circuit_equivalance(&original_circuit, &mixed_circuit, &mut rng);
+
                 mixing_steps += 1;
             }
 
@@ -993,34 +1083,6 @@ mod tests {
                 "Topological order after local mixing iteration: {:?}",
                 &top_sorted_nodes
             );
-        }
-
-        let mixed_circuit = Circuit::new(
-            top_sorted_nodes
-                .iter()
-                .map(|node| {
-                    gate_map
-                        .get(skeleton_graph.node_weight(*node).unwrap())
-                        .unwrap()
-                        .clone()
-                })
-                .collect_vec(),
-            n as usize,
-        );
-
-        for value in rng.sample_iter(Uniform::new(0, 1usize << n)).take(1000) {
-            let mut inputs = vec![];
-            for i in 0..n {
-                inputs.push((value >> i) & 1usize == 1);
-            }
-
-            let mut inputs0 = inputs.clone();
-            original_circuit.run(&mut inputs0);
-
-            let mut inputs1 = inputs.clone();
-            mixed_circuit.run(&mut inputs1);
-
-            assert_eq!(inputs0, inputs1);
         }
     }
 
@@ -1071,6 +1133,58 @@ mod tests {
                 });
 
             assert_eq!(visited_with_path, expected_visited_nodes);
+        }
+    }
+
+    #[test]
+    fn test_find_convex_subcircuit() {
+        let gates = 50;
+        let n = 10;
+        let ell_out = 5;
+        let max_iterations = 10000;
+        let mut rng = thread_rng();
+
+        let mut iter = 0;
+        while iter < 1000 {
+            let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
+            let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+
+            let convex_subgraph =
+                find_convex_subcircuit(&skeleton_graph, ell_out, max_iterations, &mut rng);
+
+            match convex_subgraph {
+                Some(convex_subgraph) => {
+                    // check that the subgraph is convex
+
+                    let values = convex_subgraph.iter().map(|v| *v).collect_vec();
+                    // If path exists from i to j then find all nodes in any path from i to j and check that the nodes are in the convex subgraph set
+                    for i in 0..values.len() {
+                        for j in 0..values.len() {
+                            if i != j {
+                                if has_path_connecting(&skeleton_graph, values[i], values[j], None)
+                                {
+                                    all_simple_paths::<Vec<_>, _>(
+                                        &skeleton_graph,
+                                        values[i],
+                                        values[j],
+                                        0,
+                                        None,
+                                    )
+                                    .into_iter()
+                                    .for_each(|path| {
+                                        path.iter().for_each(|node| {
+                                            assert!(convex_subgraph.contains(node));
+                                        });
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    iter += 1;
+                }
+                None => {}
+            }
         }
     }
 
