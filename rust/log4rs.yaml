@@ -1,0 +1,12 @@
+# log4rs.yaml
+appenders:
+    file:
+        kind: file
+        path: "log/output.log"
+        encoder:
+            pattern: "{d} - {l} - {m}{n}"
+
+root:
+    level: trace
+    appenders:
+        - file

@@ -1,3 +1,5 @@
 venv
 target
 *.txt
+log
+*.log

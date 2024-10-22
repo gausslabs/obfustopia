@@ -4,8 +4,8 @@ use itertools::{izip, Itertools};
 use petgraph::algo::toposort;
 use rand::{distributions::Uniform, thread_rng, Rng, RngCore};
 use rust::{
-    circuit_to_skeleton_graph, local_mixing_step, sample_circuit_with_base_gate,
-    test_circuit_equivalance, BaseGate, Circuit, Gate,
+    circuit_to_skeleton_graph, local_mixing_step, node_indices_to_gate_ids,
+    sample_circuit_with_base_gate, test_circuit_equivalance, BaseGate, Circuit, Gate,
 };
 
 fn strategy1<R: RngCore>(
@@ -32,13 +32,13 @@ fn strategy1<R: RngCore>(
 
     let mut mixing_steps = 0;
     let inflationary_mixing_steps = 100;
-    let kneading_mixing_steps = 100;
+    let kneading_mixing_steps = 500;
 
     let mut top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
 
     // Inflationary stage
     while mixing_steps < inflationary_mixing_steps {
-        log::info!("#### Inflationary mixing step {mixing_steps} ####");
+        log::info!("############################## Inflationary mixing step {mixing_steps} ##############################");
 
         let success = local_mixing_step::<2, _, _>(
             &mut skeleton_graph,
@@ -68,16 +68,19 @@ fn strategy1<R: RngCore>(
                 }
             }
 
-            log::info!(
+            #[cfg(feature = "trace")]
+            log::trace!(
                 "Topsorted nodes after step {mixing_steps}: {:?}",
-                &top_sorted_nodes
+                node_indices_to_gate_ids(top_sorted_nodes.iter(), &skeleton_graph)
             );
 
             mixing_steps += 1;
         }
     }
 
-    log::info!("#### Inflationary stage finished ####");
+    log::info!(
+        "############################## Inflationary stage finished ##############################"
+    );
 
     let mixed_circuit = Circuit::from_top_sorted_nodes(
         &top_sorted_nodes,
@@ -90,7 +93,7 @@ fn strategy1<R: RngCore>(
     // Kneading stage
     mixing_steps = 0; // reset
     while mixing_steps < kneading_mixing_steps {
-        log::info!("#### Kneading mixing step {mixing_steps} ####");
+        log::info!("############################## Kneading mixing step {mixing_steps} ##############################");
 
         let success = local_mixing_step::<2, _, _>(
             &mut skeleton_graph,
@@ -120,9 +123,10 @@ fn strategy1<R: RngCore>(
                 }
             }
 
-            log::info!(
+            #[cfg(feature = "trace")]
+            log::trace!(
                 "Topsorted nodes after step {mixing_steps}: {:?}",
-                &top_sorted_nodes
+                node_indices_to_gate_ids(top_sorted_nodes.iter(), &skeleton_graph)
             );
 
             mixing_steps += 1;
@@ -137,7 +141,9 @@ fn strategy1<R: RngCore>(
         test_circuit_equivalance(&original_circuit, &mixed_circuit, rng);
     }
 
-    log::info!("#### Kneading stage finished ####");
+    log::info!(
+        "############################## Kneading stage finished ##############################"
+    );
 
     let mixed_circuit = Circuit::from_top_sorted_nodes(
         &top_sorted_nodes,
@@ -149,7 +155,8 @@ fn strategy1<R: RngCore>(
 }
 
 fn main() {
-    env_logger::init();
+    log4rs::init_file("log4rs.yaml", Default::default()).unwrap();
+    // env_logger::init();
 
     let gates = 100;
     let n = 15;
