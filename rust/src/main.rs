@@ -24,8 +24,8 @@ fn strategy1<R: RngCore>(
     let ell_out_inf = 2;
     let ell_in_inf = 4;
 
-    let ell_out_knd = 3;
-    let ell_in_knd = 3;
+    let ell_out_knd = 4;
+    let ell_in_knd = 4;
 
     let max_convex_iterations = 1000usize;
     let max_replacement_iterations = 1000000usize;
@@ -37,9 +37,11 @@ fn strategy1<R: RngCore>(
     let mut top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
 
     // Inflationary stage
+
     while mixing_steps < inflationary_mixing_steps {
         log::info!("############################## Inflationary mixing step {mixing_steps} ##############################");
 
+        let now = std::time::Instant::now();
         let success = local_mixing_step::<2, _, _>(
             &mut skeleton_graph,
             ell_in_inf,
@@ -53,8 +55,12 @@ fn strategy1<R: RngCore>(
             max_convex_iterations,
             rng,
         );
+        let elapsed = now.elapsed();
 
-        log::info!("local mixing step {mixing_steps} returned {success}");
+        log::info!(
+            "local mixing step {mixing_steps} returned {success} in {:?}",
+            elapsed
+        );
 
         if success {
             let top_sort_res = toposort(&skeleton_graph, None);
@@ -95,6 +101,7 @@ fn strategy1<R: RngCore>(
     while mixing_steps < kneading_mixing_steps {
         log::info!("############################## Kneading mixing step {mixing_steps} ##############################");
 
+        let now = std::time::Instant::now();
         let success = local_mixing_step::<2, _, _>(
             &mut skeleton_graph,
             ell_in_knd,
@@ -108,8 +115,12 @@ fn strategy1<R: RngCore>(
             max_convex_iterations,
             rng,
         );
+        let elapsed = now.elapsed();
 
-        log::info!("local mixing step {mixing_steps} returned {success}");
+        log::info!(
+            "local mixing step {mixing_steps} returned {success} in {:?}",
+            elapsed
+        );
 
         if success {
             let top_sort_res = toposort(&skeleton_graph, None);
@@ -158,8 +169,8 @@ fn main() {
     log4rs::init_file("log4rs.yaml", Default::default()).unwrap();
     // env_logger::init();
 
-    let gates = 100;
-    let n = 15;
+    let gates = 200;
+    let n = 128;
     let mut rng = thread_rng();
     let (original_circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
 
