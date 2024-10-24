@@ -2,6 +2,7 @@ use std::{collections::HashMap, fmt::Display};
 
 use itertools::Itertools;
 use petgraph::{graph::NodeIndex, Graph};
+use serde::{Deserialize, Serialize};
 
 pub trait Gate {
     type Input: ?Sized;
@@ -15,12 +16,16 @@ pub trait Gate {
     fn id(&self) -> usize;
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "D: Serialize, [D; N]: Serialize",
+    deserialize = "D: Deserialize<'de>, [D; N]: Deserialize<'de>"
+))]
 pub struct BaseGate<const N: usize, D> {
     id: usize,
     target: D,
     controls: [D; N],
-    control_func: fn(&[D; N], &[bool]) -> bool,
+    // control_func: fn(&[D; N], &[bool]) -> bool,
 }
 
 impl<const N: usize, D> BaseGate<N, D> {
@@ -28,19 +33,19 @@ impl<const N: usize, D> BaseGate<N, D> {
         id: usize,
         target: D,
         controls: [D; N],
-        control_func: fn(&[D; N], &[bool]) -> bool,
+        // control_func: fn(&[D; N], &[bool]) -> bool,
     ) -> Self {
         Self {
             id,
             target,
             controls,
-            control_func,
+            // control_func,
         }
     }
 
-    pub(crate) fn control_func(&self) -> &fn(&[D; N], &[bool]) -> bool {
-        &self.control_func
-    }
+    // pub(crate) fn control_func(&self) -> &fn(&[D; N], &[bool]) -> bool {
+    //     &self.control_func
+    // }
 }
 
 impl<const N: usize, D> Gate for BaseGate<N, D>
@@ -53,8 +58,8 @@ where
 
     fn run(&self, input: &mut Self::Input) {
         // control bit XOR target
-        input[self.target.into()] =
-            input[self.target.into()] ^ (self.control_func)(&self.controls, input);
+        input[self.target.into()] = input[self.target.into()]
+            ^ (input[self.controls[0].into()] & input[self.controls[1].into()]);
     }
 
     fn controls(&self) -> &Self::Controls {
@@ -74,6 +79,7 @@ where
     }
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 pub struct Circuit<G> {
     gates: Vec<G>,
     n: usize,

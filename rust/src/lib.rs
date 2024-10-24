@@ -11,8 +11,13 @@ use petgraph::{
 };
 use rand::{
     distributions::{uniform::SampleUniform, Uniform},
-    Rng, RngCore,
+    Rng, RngCore, SeedableRng,
 };
+use rayon::{
+    current_num_threads,
+    iter::{IntoParallelIterator, ParallelIterator},
+};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
@@ -239,7 +244,7 @@ where
     let distribution = Uniform::new(D::zero(), n);
     let mut gates = Vec::with_capacity(gate_count);
     let mut curr_gate = 0;
-    let mut sample_trace = Sha256::new();
+    // let mut sample_trace = Sha256::new();
     let mut id = 0;
 
     while curr_gate < gate_count {
@@ -252,16 +257,11 @@ where
             controls[0] = iter.next().unwrap();
             controls[1] = iter.next().unwrap();
 
-            sample_trace.update(format!("TWO{target}{}{}", controls[0], controls[1],));
+            // sample_trace.update(format!("TWO{target}{}{}", controls[0], controls[1],));
 
             curr_gate += two_replacement_cost;
 
-            gates.push(BaseGate::<MAX_K, D>::new(
-                id,
-                target,
-                controls,
-                |controls, inputs| inputs[controls[0].into()] & inputs[controls[1].into()],
-            ));
+            gates.push(BaseGate::<MAX_K, D>::new(id, target, controls));
         } else {
             assert!(MAX_K == 3);
             let if_true_three = rng.gen_bool(1.0 - two_prob);
@@ -275,23 +275,14 @@ where
                     controls[i] = iter.next().unwrap();
                 }
 
-                sample_trace.update(format!(
-                    "THREE{target}{}{}{}",
-                    controls[0], controls[1], controls[2]
-                ));
+                // sample_trace.update(format!(
+                //     "THREE{target}{}{}{}",
+                //     controls[0], controls[1], controls[2]
+                // ));
 
                 curr_gate += three_replacement_cost;
 
-                gates.push(BaseGate::<MAX_K, D>::new(
-                    id,
-                    target,
-                    controls,
-                    |controls, inputs| {
-                        inputs[controls[0].into()]
-                            & inputs[controls[1].into()]
-                            & inputs[controls[2].into()]
-                    },
-                ));
+                gates.push(BaseGate::<MAX_K, D>::new(id, target, controls));
             } else {
                 // sample 2 way CNOTs
                 let unique_vals = sample_m_unique_values::<3, _, _>(rng, &distribution);
@@ -305,25 +296,20 @@ where
                 // With MAX_K = 3, if any gate has 2 controls then set the last control = n. n indicates useless slot.
                 controls[2] = n;
 
-                sample_trace.update(format!("TWO{target}{}{}", controls[0], controls[1],));
+                // sample_trace.update(format!("TWO{target}{}{}", controls[0], controls[1],));
 
                 curr_gate += two_replacement_cost;
 
-                gates.push(BaseGate::<MAX_K, D>::new(
-                    id,
-                    target,
-                    controls,
-                    |controls, inputs| inputs[controls[0].into()] & inputs[controls[1].into()],
-                ));
+                gates.push(BaseGate::<MAX_K, D>::new(id, target, controls));
             };
         }
 
         id += 1;
     }
 
-    let sample_trace: String = format!("{:X}", sample_trace.finalize());
+    // let sample_trace: String = format!("{:X}", sample_trace.finalize());
 
-    (Circuit::new(gates, n.into()), sample_trace)
+    (Circuit::new(gates, n.into()), String::new())
 }
 
 /// Checks whether collisions set of any circuit is weakly connected.
@@ -372,6 +358,38 @@ fn is_collisions_set_weakly_connected(collisions_set: &[HashSet<usize>]) -> bool
     is_weakly_connected
 }
 
+fn par_find_replacement_circuit<
+    const MAX_K: usize,
+    const WC: bool,
+    D,
+    R: Send + Sync + RngCore + SeedableRng,
+>(
+    circuit: &Circuit<BaseGate<MAX_K, D>>,
+    ell_in: usize,
+    n: D,
+    two_prob: f64,
+    max_iterations: usize,
+    rng: &mut R,
+) -> Option<Circuit<BaseGate<MAX_K, D>>>
+where
+    D: Send + Sync + Zero + SampleUniform + Copy + Eq + Hash + Display + Debug + Into<usize>,
+{
+    (0..current_num_threads())
+        .map(|_| R::from_rng(&mut *rng).unwrap())
+        .collect_vec()
+        .into_par_iter()
+        .find_map_any(|mut rng| {
+            find_replacement_circuit::<MAX_K, WC, _, _>(
+                circuit,
+                ell_in,
+                n,
+                two_prob,
+                max_iterations,
+                &mut rng,
+            )
+        })
+}
+
 fn find_replacement_circuit<const MAX_K: usize, const WC: bool, D, R: RngCore>(
     circuit: &Circuit<BaseGate<MAX_K, D>>,
     ell_in: usize,
@@ -381,53 +399,53 @@ fn find_replacement_circuit<const MAX_K: usize, const WC: bool, D, R: RngCore>(
     rng: &mut R,
 ) -> Option<Circuit<BaseGate<MAX_K, D>>>
 where
-    D: Zero + SampleUniform + Copy + Eq + Hash + Display + Debug + Into<usize>,
+    D: Zero + SampleUniform + Copy + Eq + Hash + Display + Debug + Into<usize> + PartialEq + Eq,
 {
     let input_value_to_bitstring_map = input_value_to_bitstring_map(circuit.n());
     let permutation_map = permutation_map(circuit, &input_value_to_bitstring_map);
 
     let mut curr_iter = 0;
     let mut replacement_circuit = None;
-    let mut visited_circuits = HashMap::new();
+    // let mut visited_circuits = HashMap::new();
 
     while curr_iter < max_iterations {
-        let (random_circuit, circuit_trace) =
+        let (random_circuit, _) =
             sample_circuit_with_base_gate::<MAX_K, D, _>(ell_in, n, two_prob, rng);
 
-        if visited_circuits.contains_key(&circuit_trace) {
-            let count = visited_circuits.get_mut(&circuit_trace).unwrap();
-            *count += 1;
-        } else {
-            visited_circuits.insert(circuit_trace, 1usize);
+        let mut funtionally_equivalent = true;
+        for (value, bitstring) in input_value_to_bitstring_map.iter() {
+            let mut inputs = bitstring.to_vec();
+            random_circuit.run(&mut inputs);
 
-            let mut funtionally_equivalent = true;
-            for (value, bitstring) in input_value_to_bitstring_map.iter() {
-                let mut inputs = bitstring.to_vec();
-                random_circuit.run(&mut inputs);
-
-                if &inputs != permutation_map.get(value).unwrap() {
-                    funtionally_equivalent = false;
-                    break;
-                }
-            }
-
-            if funtionally_equivalent && WC {
-                let collisions_set = circuit_to_collision_sets(&random_circuit);
-                let is_weakly_connected = is_collisions_set_weakly_connected(&collisions_set);
-                funtionally_equivalent = is_weakly_connected;
-            }
-
-            if funtionally_equivalent {
-                replacement_circuit = Some(random_circuit);
+            if &inputs != permutation_map.get(value).unwrap() {
+                funtionally_equivalent = false;
                 break;
             }
+        }
+
+        if funtionally_equivalent {
+            funtionally_equivalent = &random_circuit != circuit
+        }
+
+        if funtionally_equivalent && WC {
+            let collisions_set = circuit_to_collision_sets(&random_circuit);
+            let is_weakly_connected = is_collisions_set_weakly_connected(&collisions_set);
+            if funtionally_equivalent && !is_weakly_connected {
+                log::trace!("[find_replacement_circuit] wft");
+            }
+            funtionally_equivalent = is_weakly_connected;
+        }
+
+        if funtionally_equivalent {
+            replacement_circuit = Some(random_circuit);
+            break;
         }
 
         curr_iter += 1;
 
         #[cfg(feature = "trace")]
-        if curr_iter % 100000 == 0 {
-            log::trace!("[find_replacement_circuit] 100K iterations done");
+        if curr_iter % 10000000 == 0 {
+            log::trace!("[find_replacement_circuit] 100K iterations done",);
         }
 
         // if curr_iter == max_iterations {
@@ -441,7 +459,16 @@ where
     // });
 
     #[cfg(feature = "trace")]
-    log::trace!("Finding replacement total iterations: {}", curr_iter);
+    log::trace!(
+        "Finding replacement total iterations: {}",
+        curr_iter,
+        // visited_circuits
+        //     .values()
+        //     .counts()
+        //     .into_iter()
+        //     .sorted()
+        //     .collect_vec()
+    );
     // println!("Visited frequency: {:?}", visited_freq);
 
     return replacement_circuit;
@@ -924,7 +951,6 @@ where
                 index,
                 *old_to_new_map.get(&gate.target()).unwrap(),
                 new_controls,
-                gate.control_func().clone(),
             )
         })
         .collect_vec();
@@ -961,7 +987,6 @@ where
                     *latest_id,
                     *new_to_old_map.get(&g.target()).unwrap(),
                     old_controls,
-                    g.control_func().clone(),
                 )
             })
             .collect(),
@@ -973,7 +998,8 @@ where
         log::trace!("Old to new wires map: {:?}", &old_to_new_map);
         log::trace!("New to old wires map: {:?}", &new_to_old_map);
         log::trace!("@@@@ C^out @@@@ {}", &c_out);
-        log::trace!("@@@@ C^in @@@@ {}", &c_in_dash);
+        log::trace!("@@@@ C^in' @@@@ {}", &c_in_dash);
+        log::trace!("@@@@ C^in @@@@ {}", &c_in);
         log::trace!("C^in collision sets: {:?}", &collision_sets_c_in);
     }
 
@@ -1236,6 +1262,11 @@ pub fn check_probabilisitic_equivalence<G, R: RngCore>(
 mod tests {
 
     use std::iter::Sum;
+    use std::{
+        collections::{hash_map::Entry, BTreeMap},
+        iter::repeat_with,
+        usize,
+    };
 
     use petgraph::{
         algo::{all_simple_paths, connected_components, has_path_connecting, toposort},
@@ -1251,7 +1282,7 @@ mod tests {
         env_logger::init();
 
         let gates = 100;
-        let n = 8;
+        let n = 6;
         let mut rng = ChaCha8Rng::from_entropy();
         let (original_circuit, _) =
             sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
@@ -1265,8 +1296,8 @@ mod tests {
             gate_map.insert(g.id(), g.clone());
         });
 
-        let ell_out = 2;
-        let ell_in = 4;
+        let ell_out = 5;
+        let ell_in = 5;
         let max_convex_iterations = 1000usize;
         let max_replacement_iterations = 1000000usize;
 
@@ -1333,6 +1364,9 @@ mod tests {
                     original_circuit.n(),
                 );
                 check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, &mut rng);
+
+                println!("{original_circuit}");
+                println!("{mixed_circuit}");
 
                 mixing_steps += 1;
             }
@@ -1487,6 +1521,69 @@ mod tests {
         }
     }
 
+    // fn find_replacement_circuit2(
+    //     circuit: &Circuit<BaseGate<2, u8>>,
+    //     ell_in: usize,
+    //     n: u8,
+    //     two_prob: f64,
+    //     max_iterations: usize,
+    //     rng: &mut impl RngCore,
+    // ) -> Option<Circuit<BaseGate<2, u8>>> {
+    //     let input_value_to_bitstring_map = input_value_to_bitstring_map(circuit.n);
+    //     let permutation_map = permutation_map(circuit, &input_value_to_bitstring_map);
+
+    //     let mut curr_iter = 0;
+    //     let mut replacement_circuit = None;
+    //     let mut visited_circuits = HashMap::new();
+
+    //     while curr_iter < max_iterations {
+    //         let (random_circuit, circuit_trace) =
+    //             sample_circuit_with_base_gate::<2, u8, _>(ell_in, n, two_prob, rng);
+
+    //         match visited_circuits.entry(circuit_trace) {
+    //             Entry::Vacant(entry) => {
+    //                 entry.insert(1);
+
+    //                 let mut funtionally_equivalent = true;
+    //                 for (value, bitstring) in input_value_to_bitstring_map.iter() {
+    //                     let mut inputs = bitstring.to_vec();
+    //                     random_circuit.run(&mut inputs);
+
+    //                     if &inputs != permutation_map.get(value).unwrap() {
+    //                         funtionally_equivalent = false;
+    //                         break;
+    //                     }
+    //                 }
+
+    //                 if funtionally_equivalent {
+    //                     let collisions_set = circuit_to_collision_sets(&random_circuit);
+    //                     let is_weakly_connected =
+    //                         is_collisions_set_weakly_connected(&collisions_set);
+    //                     if funtionally_equivalent && !is_weakly_connected {
+    //                         log::trace!("[find_replacement_circuit] wft");
+    //                     }
+    //                     funtionally_equivalent = is_weakly_connected;
+    //                 }
+
+    //                 if funtionally_equivalent {
+    //                     replacement_circuit = Some(random_circuit);
+    //                     break;
+    //                 }
+    //             }
+    //             Entry::Occupied(mut entry) => *entry.get_mut() += 1,
+    //         }
+
+    //         curr_iter += 1;
+
+    //         #[cfg(feature = "trace")]
+    //         if curr_iter % 10000000 == 0 {
+    //             log::trace!("[find_replacement_circuit] 100K iterations done");
+    //         }
+    //     }
+
+    //     replacement_circuit
+    // }
+
     #[test]
     fn time_convex_subcircuit() {
         env_logger::init();
@@ -1532,5 +1629,155 @@ mod tests {
         }
 
         println!("Average blah runtime: {}", stats.average());
+    }
+    fn sample_c_out(n: usize, ell_out: usize, rng: &mut impl RngCore) -> Circuit<BaseGate<2, u8>> {
+        loop {
+            let (original_circuit, _) =
+                sample_circuit_with_base_gate::<2, u8, _>(100, n as u8, 1.0, rng);
+
+            if original_circuit.n() != n {
+                continue;
+            }
+
+            let skeleton_graph = circuit_to_skeleton_graph(&original_circuit);
+            let top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
+            let mut latest_id = 0;
+            let mut gate_map = HashMap::new();
+            original_circuit.gates().iter().for_each(|g| {
+                latest_id = std::cmp::max(latest_id, g.id());
+                gate_map.insert(g.id(), g.clone());
+            });
+
+            for _ in 0..10 {
+                match find_convex_fast(&skeleton_graph, ell_out, usize::MAX, rng) {
+                    Some(convex_subset) => {
+                        // Convex subset sorted in topological order
+                        let convex_subgraph_top_sorted_gate_ids = top_sorted_nodes
+                            .iter()
+                            .filter(|v| convex_subset.contains(v))
+                            .map(|node_index| skeleton_graph.node_weight(*node_index).unwrap());
+
+                        let convex_subgraph_gates = convex_subgraph_top_sorted_gate_ids
+                            .map(|node| gate_map.get(node).unwrap());
+
+                        // Set of active wires in convex subgraph
+                        let mut omega_out = HashSet::new();
+                        convex_subgraph_gates.clone().for_each(|g| {
+                            omega_out.insert(g.target());
+                            for wire in g.controls().iter() {
+                                omega_out.insert(*wire);
+                            }
+                        });
+
+                        assert!(omega_out.len() > 3);
+
+                        // Map from old wires to new wires in C^out
+                        let mut old_to_new_map = HashMap::new();
+                        let mut new_to_old_map = HashMap::new();
+                        for (new_index, old_index) in omega_out.iter().enumerate() {
+                            old_to_new_map.insert(*old_index, new_index as u8);
+                            new_to_old_map.insert(new_index as u8, *old_index);
+                        }
+                        let c_out_gates = convex_subgraph_gates
+                            .clone()
+                            .enumerate()
+                            .map(|(index, gate)| {
+                                let old_controls = gate.controls();
+                                let mut new_controls = [0; 2];
+                                new_controls[0] = *old_to_new_map.get(&old_controls[0]).unwrap();
+                                new_controls[1] = *old_to_new_map.get(&old_controls[1]).unwrap();
+                                BaseGate::<2, u8>::new(
+                                    index,
+                                    *old_to_new_map.get(&gate.target()).unwrap(),
+                                    new_controls,
+                                )
+                            })
+                            .collect_vec();
+
+                        let c_out = Circuit::new(c_out_gates, omega_out.len());
+
+                        if c_out.n() == n {
+                            return c_out;
+                        } else {
+                            continue;
+                        }
+                    }
+                    None => continue,
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sample_c_outs() {
+        env_logger::init();
+
+        let mut rng = ChaCha8Rng::from_entropy();
+
+        let ell_out = 5;
+        let ell_in = ell_out;
+
+        for n in 5..12 {
+            let mut samples = Vec::new();
+            loop {
+                let c_out = sample_c_out(n, ell_out, &mut rng);
+
+                assert_eq!(c_out.n(), n);
+
+                if let Some(c_in) = find_replacement_circuit::<2, true, u8, _>(
+                    &c_out,
+                    ell_in,
+                    c_out.n() as _,
+                    1.0,
+                    1000000 * n,
+                    &mut rng,
+                ) {
+                    check_probabilisitic_equivalence(&c_out, &c_in, &mut rng);
+                    samples.push(c_out);
+                    println!("samples.len() = {}", samples.len());
+                    if samples.len() == 10 {
+                        std::fs::write(
+                            format!("./samples-{n}"),
+                            bincode::serialize(&samples).unwrap(),
+                        )
+                        .unwrap();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replace_sampled_c_outs() {
+        env_logger::init();
+
+        let mut rng = ChaCha8Rng::from_entropy();
+
+        let ell_out = 5;
+        let ell_in = ell_out;
+
+        for n in 5..8 {
+            let samples: Vec<Circuit<BaseGate<2, u8>>> =
+                bincode::deserialize(&std::fs::read(format!("./10-24/samples-{n}")).unwrap())
+                    .unwrap();
+            for (idx, c_out) in samples.iter().enumerate() {
+                let start = std::time::Instant::now();
+                loop {
+                    if let Some(c_in) = par_find_replacement_circuit::<2, true, u8, _>(
+                        c_out,
+                        ell_in,
+                        c_out.n() as _,
+                        1.0,
+                        1000000 * n / current_num_threads(),
+                        &mut rng,
+                    ) {
+                        check_probabilisitic_equivalence(c_out, &c_in, &mut rng);
+                        break;
+                    }
+                }
+                println!("{n}: {idx}/{} ({:?})", samples.len(), start.elapsed());
+            }
+        }
     }
 }
