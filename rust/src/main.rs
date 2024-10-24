@@ -4,8 +4,8 @@ use itertools::{izip, Itertools};
 use petgraph::algo::toposort;
 use rand::{distributions::Uniform, thread_rng, Rng, RngCore};
 use rust::{
-    circuit_to_skeleton_graph, local_mixing_step, node_indices_to_gate_ids,
-    sample_circuit_with_base_gate, test_circuit_equivalance, BaseGate, Circuit, Gate,
+    check_probabilisitic_equivalence, circuit_to_skeleton_graph, local_mixing_step,
+    node_indices_to_gate_ids, sample_circuit_with_base_gate, timed, BaseGate, Circuit, Gate,
 };
 
 fn strategy1<R: RngCore>(
@@ -31,8 +31,8 @@ fn strategy1<R: RngCore>(
     let max_replacement_iterations = 1000000usize;
 
     let mut mixing_steps = 0;
-    let inflationary_mixing_steps = 100;
-    let kneading_mixing_steps = 500;
+    let inflationary_mixing_steps = 10000;
+    let kneading_mixing_steps = 10000;
 
     let mut top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
 
@@ -63,7 +63,10 @@ fn strategy1<R: RngCore>(
         );
 
         if success {
-            let top_sort_res = toposort(&skeleton_graph, None);
+            let top_sort_res = timed!(
+                "Topological sort after local mixing",
+                toposort(&skeleton_graph, None)
+            );
             match top_sort_res {
                 Result::Ok(v) => {
                     top_sorted_nodes = v;
@@ -80,6 +83,14 @@ fn strategy1<R: RngCore>(
                 node_indices_to_gate_ids(top_sorted_nodes.iter(), &skeleton_graph)
             );
 
+            let mixed_circuit = Circuit::from_top_sorted_nodes(
+                &top_sorted_nodes,
+                &skeleton_graph,
+                &gate_map,
+                original_circuit.n(),
+            );
+            check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, rng);
+
             mixing_steps += 1;
         }
     }
@@ -87,14 +98,6 @@ fn strategy1<R: RngCore>(
     log::info!(
         "############################## Inflationary stage finished ##############################"
     );
-
-    let mixed_circuit = Circuit::from_top_sorted_nodes(
-        &top_sorted_nodes,
-        &skeleton_graph,
-        &gate_map,
-        original_circuit.n(),
-    );
-    test_circuit_equivalance(&original_circuit, &mixed_circuit, rng);
 
     // Kneading stage
     mixing_steps = 0; // reset
@@ -123,7 +126,10 @@ fn strategy1<R: RngCore>(
         );
 
         if success {
-            let top_sort_res = toposort(&skeleton_graph, None);
+            let top_sort_res = timed!(
+                "Topological sort after local mixing",
+                toposort(&skeleton_graph, None)
+            );
             match top_sort_res {
                 Result::Ok(v) => {
                     top_sorted_nodes = v;
@@ -149,7 +155,7 @@ fn strategy1<R: RngCore>(
             &gate_map,
             original_circuit.n(),
         );
-        test_circuit_equivalance(&original_circuit, &mixed_circuit, rng);
+        check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, rng);
     }
 
     log::info!(
@@ -176,9 +182,5 @@ fn main() {
 
     let mixed_circuit = strategy1(&original_circuit, n, &mut rng);
 
-    test_circuit_equivalance(&original_circuit, &mixed_circuit, &mut rng);
+    check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, &mut rng);
 }
-
-// 1. Change log::info to trace that prints weights instead of indices. This is because indices change with node removal where as are constant.
-// 2. Check whether graph can be constructed from a dot file. If so, we can use this method to construct graphs for debugging.
-// 3.
