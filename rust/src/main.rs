@@ -1,12 +1,12 @@
-use std::collections::HashMap;
-
-use itertools::{izip, Itertools};
 use petgraph::algo::toposort;
-use rand::{distributions::Uniform, thread_rng, Rng, RngCore};
+use rand::{thread_rng, RngCore};
 use rust::{
-    check_probabilisitic_equivalence, circuit_to_skeleton_graph, local_mixing_step,
-    node_indices_to_gate_ids, sample_circuit_with_base_gate, timed, BaseGate, Circuit, Gate,
+    check_probabilisitic_equivalence,
+    circuit::{BaseGate, Circuit, Gate},
+    circuit_to_skeleton_graph, local_mixing_step, node_indices_to_gate_ids,
+    sample_circuit_with_base_gate, timed,
 };
+use std::collections::HashMap;
 
 fn strategy1<R: RngCore>(
     original_circuit: &Circuit<BaseGate<2, u8>>,

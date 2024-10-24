@@ -1,3 +1,4 @@
+use circuit::{BaseGate, Circuit, Gate};
 use either::Either::{Left, Right};
 use itertools::{izip, Itertools};
 use num_traits::Zero;
@@ -18,6 +19,8 @@ use std::{
     hash::Hash,
 };
 
+pub mod circuit;
+
 #[macro_export]
 macro_rules! timed {
     ($description:expr, $code:expr) => {{
@@ -34,6 +37,7 @@ macro_rules! timed {
     }};
 }
 
+#[allow(dead_code)]
 fn edges_to_string(edges: &HashSet<(NodeIndex, NodeIndex)>, g: &Graph<usize, usize>) -> String {
     let mut string = String::from("[");
     for edge in edges.iter() {
@@ -47,166 +51,26 @@ fn edges_to_string(edges: &HashSet<(NodeIndex, NodeIndex)>, g: &Graph<usize, usi
     string
 }
 
-pub trait Gate {
-    type Input: ?Sized;
-    type Target;
-    type Controls;
-
-    fn run(&self, input: &mut Self::Input);
-    fn target(&self) -> Self::Target;
-    fn controls(&self) -> &Self::Controls;
-    fn check_collision(&self, other: &Self) -> bool;
-    fn id(&self) -> usize;
-}
-
-#[derive(Clone)]
-pub struct BaseGate<const N: usize, D> {
-    id: usize,
-    target: D,
-    controls: [D; N],
-    control_func: fn(&[D; N], &[bool]) -> bool,
-}
-
-impl<const N: usize, D> Gate for BaseGate<N, D>
+pub fn node_indices_to_gate_ids<'a, I>(nodes: I, graph: &Graph<usize, usize>) -> Vec<usize>
 where
-    D: Into<usize> + Copy + PartialEq,
+    I: Iterator<Item = &'a NodeIndex>,
 {
-    type Input = [bool];
-    type Controls = [D; N];
-    type Target = D;
-
-    fn run(&self, input: &mut Self::Input) {
-        // control bit XOR target
-        input[self.target.into()] =
-            input[self.target.into()] ^ (self.control_func)(&self.controls, input);
-    }
-
-    fn controls(&self) -> &Self::Controls {
-        &self.controls
-    }
-
-    fn target(&self) -> Self::Target {
-        self.target
-    }
-
-    fn check_collision(&self, other: &Self) -> bool {
-        other.controls().contains(&self.target()) || self.controls().contains(&other.target())
-    }
-
-    fn id(&self) -> usize {
-        self.id
-    }
+    nodes
+        .map(|node_index| *graph.node_weight(*node_index).unwrap())
+        .collect_vec()
 }
 
-pub struct Circuit<G> {
-    gates: Vec<G>,
-    n: usize,
-}
-
-impl<G> Circuit<G>
-where
-    G: Gate<Input = [bool]>,
-{
-    pub fn run(&self, inputs: &mut [bool]) {
-        self.gates.iter().for_each(|g| {
-            g.run(inputs);
-        });
-    }
-}
-
-impl<G> Circuit<G>
-where
-    G: Clone,
-{
-    pub fn split_circuit(&self, at_gate: usize) -> (Circuit<G>, Circuit<G>) {
-        assert!(at_gate < self.gates.len());
-        let mut first_gates = self.gates.clone();
-        let second_gates = first_gates.split_off(at_gate);
-        (
-            Circuit {
-                gates: first_gates,
-                n: self.n,
-            },
-            Circuit {
-                gates: second_gates,
-                n: self.n,
-            },
-        )
-    }
-
-    pub fn from_top_sorted_nodes(
-        top_sorted_nodes: &[NodeIndex],
-        skeleton_graph: &Graph<usize, usize>,
-        gate_map: &HashMap<usize, G>,
-        n: usize,
-    ) -> Self {
-        Circuit::new(
-            top_sorted_nodes
-                .iter()
-                .map(|node| {
-                    gate_map
-                        .get(skeleton_graph.node_weight(*node).unwrap())
-                        .unwrap()
-                        .to_owned()
-                })
-                .collect_vec(),
-            n,
-        )
-    }
-}
-
-impl<G> Circuit<G> {
-    pub fn new(gates: Vec<G>, n: usize) -> Self {
-        Circuit { gates, n }
-    }
-
-    pub fn n(&self) -> usize {
-        self.n
-    }
-
-    pub fn gates(&self) -> &[G] {
-        self.gates.as_ref()
-    }
-}
-
-impl<const N: usize, D> Display for Circuit<BaseGate<N, D>>
-where
-    D: Into<usize> + Copy + PartialEq,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f)?;
-        writeln!(f, "{:-<15}", "")?;
-        for i in 0..self.n {
-            write!(f, "{:2}", i)?;
+fn input_value_to_bitstring_map(n: usize) -> HashMap<usize, Vec<bool>> {
+    assert!(n < 20, "{n} >= 20; Too big!");
+    let mut map = HashMap::new();
+    for i in 0..1usize << n {
+        let mut bitstring = vec![false; n];
+        for j in 0..n {
+            bitstring[j] = ((i >> j) & 1) == 1
         }
-        writeln!(f)?;
-
-        writeln!(f, "{:-<15}", "")?;
-
-        // Print 20 rows of values from 0 to 10
-        for g in self.gates.iter() {
-            write!(f, "{:1}", "")?;
-            for j in 0..self.n {
-                let controls = g
-                    .controls()
-                    .iter()
-                    .map(|v| (*v).into())
-                    .collect::<Vec<usize>>();
-                if g.target().into() == j {
-                    write!(f, "{:2}", "O")?;
-                } else if controls.contains(&j) {
-                    write!(f, "{:2}", "I")?;
-                } else {
-                    write!(f, "{:2}", "x")?;
-                }
-            }
-            writeln!(f)?;
-        }
-
-        writeln!(f, "{:-<15}", "")?;
-        writeln!(f)?;
-        Ok(())
+        map.insert(i, bitstring);
     }
+    return map;
 }
 
 /// Find all paths from curr_node to sink
@@ -252,24 +116,6 @@ fn dependency_chains_from_collision_set(collision_set: &[HashSet<usize>]) -> Vec
         }
     }
     return chains;
-}
-
-fn find_all_predecessors(node: NodeIndex, graph: &Graph<usize, usize>) -> HashSet<NodeIndex> {
-    let mut preds = HashSet::new();
-    // First find all immediate predecessors and successors
-    let mut path = vec![];
-    for pred_edge in graph.edges_directed(node.clone(), Direction::Incoming) {
-        let node = pred_edge.source();
-        dfs(
-            node,
-            &mut HashSet::new(),
-            &mut preds,
-            &mut path,
-            &graph,
-            Direction::Incoming,
-        );
-    }
-    return preds;
 }
 
 fn adjust_collision_with_dependency_chain<const MAX_K: usize, const IS_PRED: bool, D>(
@@ -333,28 +179,6 @@ fn adjust_collision_with_dependency_chain<const MAX_K: usize, const IS_PRED: boo
             }
         }
     }
-}
-
-pub fn node_indices_to_gate_ids<'a, I>(nodes: I, graph: &Graph<usize, usize>) -> Vec<usize>
-where
-    I: Iterator<Item = &'a NodeIndex>,
-{
-    nodes
-        .map(|node_index| *graph.node_weight(*node_index).unwrap())
-        .collect_vec()
-}
-
-fn input_value_to_bitstring_map(n: usize) -> HashMap<usize, Vec<bool>> {
-    assert!(n < 20, "{n} >= 20; Too big!");
-    let mut map = HashMap::new();
-    for i in 0..1usize << n {
-        let mut bitstring = vec![false; n];
-        for j in 0..n {
-            bitstring[j] = ((i >> j) & 1) == 1
-        }
-        map.insert(i, bitstring);
-    }
-    return map;
 }
 
 fn sample_m_unique_values<const M: usize, D, R: RngCore>(
@@ -430,14 +254,12 @@ where
 
             curr_gate += two_replacement_cost;
 
-            gates.push(BaseGate::<MAX_K, D> {
+            gates.push(BaseGate::<MAX_K, D>::new(
                 id,
                 target,
                 controls,
-                control_func: (|controls, inputs| {
-                    inputs[controls[0].into()] & inputs[controls[1].into()]
-                }),
-            });
+                |controls, inputs| inputs[controls[0].into()] & inputs[controls[1].into()],
+            ));
         } else {
             assert!(MAX_K == 3);
             let if_true_three = rng.gen_bool(1.0 - two_prob);
@@ -458,16 +280,16 @@ where
 
                 curr_gate += three_replacement_cost;
 
-                gates.push(BaseGate::<MAX_K, D> {
+                gates.push(BaseGate::<MAX_K, D>::new(
                     id,
                     target,
                     controls,
-                    control_func: (|controls, inputs| {
+                    |controls, inputs| {
                         inputs[controls[0].into()]
                             & inputs[controls[1].into()]
                             & inputs[controls[2].into()]
-                    }),
-                });
+                    },
+                ));
             } else {
                 // sample 2 way CNOTs
                 let unique_vals = sample_m_unique_values::<3, _, _>(rng, &distribution);
@@ -485,14 +307,12 @@ where
 
                 curr_gate += two_replacement_cost;
 
-                gates.push(BaseGate::<MAX_K, D> {
+                gates.push(BaseGate::<MAX_K, D>::new(
                     id,
                     target,
                     controls,
-                    control_func: (|controls, inputs| {
-                        inputs[controls[0].into()] & inputs[controls[1].into()]
-                    }),
-                });
+                    |controls, inputs| inputs[controls[0].into()] & inputs[controls[1].into()],
+                ));
             };
         }
 
@@ -501,7 +321,7 @@ where
 
     let sample_trace: String = format!("{:X}", sample_trace.finalize());
 
-    (Circuit { gates, n: n.into() }, sample_trace)
+    (Circuit::new(gates, n.into()), sample_trace)
 }
 
 /// Checks whether collisions set of any circuit is weakly connected.
@@ -561,7 +381,7 @@ fn find_replacement_circuit<const MAX_K: usize, const WC: bool, D, R: RngCore>(
 where
     D: Zero + SampleUniform + Copy + Eq + Hash + Display + Debug + Into<usize>,
 {
-    let input_value_to_bitstring_map = input_value_to_bitstring_map(circuit.n);
+    let input_value_to_bitstring_map = input_value_to_bitstring_map(circuit.n());
     let permutation_map = permutation_map(circuit, &input_value_to_bitstring_map);
 
     let mut curr_iter = 0;
@@ -741,10 +561,10 @@ fn find_convex_subcircuit<R: RngCore>(
 }
 
 fn circuit_to_collision_sets<G: Gate>(circuit: &Circuit<G>) -> Vec<HashSet<usize>> {
-    let mut all_collision_sets = Vec::with_capacity(circuit.gates.len());
-    for (i, gi) in circuit.gates.iter().enumerate() {
+    let mut all_collision_sets = Vec::with_capacity(circuit.gates().len());
+    for (i, gi) in circuit.gates().iter().enumerate() {
         let mut collision_set_i = HashSet::new();
-        for (j, gj) in (circuit.gates.iter().enumerate()).skip(i + 1) {
+        for (j, gj) in (circuit.gates().iter().enumerate()).skip(i + 1) {
             if gi.check_collision(gj) {
                 collision_set_i.insert(j);
             }
@@ -776,7 +596,7 @@ pub fn circuit_to_skeleton_graph<G: Gate>(circuit: &Circuit<G>) -> Graph<usize, 
     let mut skeleton = Graph::<usize, usize>::new();
     // add nodes with weights as ids
     let nodes = circuit
-        .gates
+        .gates()
         .iter()
         .map(|g| skeleton.add_node(g.id()))
         .collect_vec();
@@ -877,12 +697,12 @@ where
             let mut new_controls = [D::zero(); MAX_K];
             new_controls[0] = *old_to_new_map.get(&old_controls[0]).unwrap();
             new_controls[1] = *old_to_new_map.get(&old_controls[1]).unwrap();
-            BaseGate {
-                id: index,
-                target: *old_to_new_map.get(&gate.target()).unwrap(),
-                control_func: gate.control_func.clone(),
-                controls: new_controls,
-            }
+            BaseGate::new(
+                index,
+                *old_to_new_map.get(&gate.target()).unwrap(),
+                new_controls,
+                gate.control_func().clone(),
+            )
         })
         .collect_vec();
 
@@ -891,7 +711,7 @@ where
     let c_in_dash = match find_replacement_circuit::<MAX_K, true, D, _>(
         &c_out,
         ell_in,
-        D::try_from(c_out.n).unwrap(),
+        D::try_from(c_out.n()).unwrap(),
         two_prob,
         max_replacement_iterations,
         rng,
@@ -904,7 +724,7 @@ where
 
     let c_in = Circuit::new(
         c_in_dash
-            .gates
+            .gates()
             .iter()
             .map(|g| {
                 *latest_id += 1;
@@ -914,12 +734,12 @@ where
                 let mut old_controls = [D::zero(); MAX_K];
                 old_controls[0] = *new_to_old_map.get(&new_controls[0]).unwrap();
                 old_controls[1] = *new_to_old_map.get(&new_controls[1]).unwrap();
-                BaseGate::<MAX_K, _> {
-                    id: *latest_id,
-                    target: *new_to_old_map.get(&g.target()).unwrap(),
-                    controls: old_controls,
-                    control_func: g.control_func.clone(),
-                }
+                BaseGate::<MAX_K, _>::new(
+                    *latest_id,
+                    *new_to_old_map.get(&g.target()).unwrap(),
+                    old_controls,
+                    g.control_func().clone(),
+                )
             })
             .collect(),
         n.into(),
@@ -988,7 +808,7 @@ where
     }
 
     let c_in_nodes = c_in
-        .gates
+        .gates()
         .iter()
         .map(|g| {
             let node = skeleton_graph.add_node(g.id());
@@ -1079,8 +899,8 @@ pub fn check_probabilisitic_equivalence<G, R: RngCore>(
 ) where
     G: Gate<Input = [bool]>,
 {
-    assert_eq!(circuit0.n, circuit1.n);
-    let n = circuit0.n;
+    assert_eq!(circuit0.n(), circuit1.n());
+    let n = circuit0.n();
 
     for value in rng.sample_iter(Uniform::new(0, 1u128 << n - 1)).take(10000) {
         // for value in 0..1u128 << 8 {
@@ -1136,7 +956,7 @@ mod tests {
         let mut top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
         let mut latest_id = 0;
         let mut gate_map = HashMap::new();
-        original_circuit.gates.iter().for_each(|g| {
+        original_circuit.gates().iter().for_each(|g| {
             latest_id = std::cmp::max(latest_id, g.id());
             gate_map.insert(g.id(), g.clone());
         });
@@ -1366,101 +1186,5 @@ mod tests {
         }
 
         dbg!(chains);
-    }
-
-    pub fn sample_circuit(
-        random_range: Uniform<usize>,
-        max_iterations: usize,
-        gate_count: usize,
-        n: usize,
-        logn: usize,
-        input_value_to_bitstring_map: &HashMap<usize, Vec<bool>>,
-        permutation_map: HashMap<usize, Vec<bool>>,
-    ) -> Option<Circuit<BaseGate<2, u8>>> {
-        // let total_bits = logn * 3usize * gate_count;
-
-        // let random_range = Uniform::new(1usize << total_bits, 1usize << (total_bits + 1));
-
-        let mut rng = ChaCha8Rng::from_entropy();
-
-        let mut visited = HashSet::new();
-
-        let mut out_circuit = None;
-
-        let mut curr_iter = 0;
-        while curr_iter < max_iterations {
-            let mut sample = rng.sample(random_range);
-            while visited.contains(&sample) {
-                sample = rng.sample(random_range);
-            }
-
-            visited.insert(sample);
-
-            let mut gate_wires = vec![];
-            let gate_wires_mask = (1usize << (logn * 3)) - 1;
-            for i in 0..gate_count {
-                gate_wires.push((sample >> (i * logn * 3)) & gate_wires_mask);
-            }
-
-            // check wires in the gates are distinct
-            let wire_mask = (1usize << logn) - 1;
-            let mut distinct_wires = true;
-            let mut out_gates = vec![];
-            for (gate_id, wires) in gate_wires.iter().enumerate() {
-                let mut wire0 = wires & wire_mask;
-                let mut wire1 = (wires >> logn) & (wire_mask);
-                let mut wire2 = (wires >> (2 * logn)) & (wire_mask);
-
-                // if wire0 >= n {
-                //     wire0 -= n;
-                // }
-                // if wire1 >= n {
-                //     wire1 -= n;
-                // }
-                // if wire2 >= n {
-                //     wire2 -= n;
-                // }
-
-                if (wire0 ^ wire1) == 0 || (wire0 ^ wire2) == 0 || (wire1 ^ wire2) == 0 {
-                    distinct_wires = false;
-                    break;
-                }
-
-                out_gates.push(BaseGate::<2, u8> {
-                    id: gate_id,
-                    target: wire0 as u8,
-                    controls: [wire1 as u8, wire2 as u8],
-                    control_func: (|controls, inputs| {
-                        inputs[controls[0] as usize] & inputs[controls[1] as usize]
-                    }),
-                });
-            }
-
-            // Count as valid circuit iff there's a valid composition of gates with distinct wires in each gate.
-            if distinct_wires {
-                // check permutation
-                let random_circuit = Circuit::new(out_gates, n);
-
-                let mut funtionally_equivalent = true;
-                for (value, bitstring) in input_value_to_bitstring_map.iter() {
-                    let mut inputs = bitstring.to_vec();
-                    random_circuit.run(&mut inputs);
-
-                    if &inputs != permutation_map.get(value).unwrap() {
-                        funtionally_equivalent = false;
-                        break;
-                    }
-                }
-
-                if funtionally_equivalent {
-                    // found the circuit
-                    out_circuit = Some(random_circuit);
-                } else {
-                    curr_iter += 1;
-                }
-            }
-        }
-
-        return out_circuit;
     }
 }
