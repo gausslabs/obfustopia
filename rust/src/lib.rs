@@ -583,14 +583,17 @@ fn blah(
     let mut union_visited = HashSet::new();
     let mut path = vec![];
     for source in convex_set.iter() {
-        let dfs_did_not_break = dfs2(
-            *source,
-            &mut union_visited_with_path,
-            &mut union_visited,
-            &mut path,
-            &graph,
-            Direction::Outgoing,
-            desire_set_size,
+        let dfs_did_not_break = timed!(
+            "dfs2 time",
+            dfs2(
+                *source,
+                &mut union_visited_with_path,
+                &mut union_visited,
+                &mut path,
+                &graph,
+                Direction::Outgoing,
+                desire_set_size,
+            )
         );
 
         if !dfs_did_not_break {
@@ -614,7 +617,7 @@ fn blah(
     }
 }
 
-fn trialll<R: RngCore>(
+fn find_convex_fast<R: RngCore>(
     graph: &Graph<usize, usize>,
     ell_out: usize,
     max_iterations: usize,
@@ -623,8 +626,16 @@ fn trialll<R: RngCore>(
     let mut curr_iter = 0;
 
     let mut final_convex_set = None;
+    let mut exhausted = HashSet::new();
     while curr_iter < max_iterations {
         let start_node = NodeIndex::from(rng.gen_range(0..graph.node_count()) as u32);
+
+        if exhausted.contains(&start_node) {
+            continue;
+        } else {
+            exhausted.insert(start_node);
+        }
+
         let mut convex_set = HashSet::new();
         convex_set.insert(start_node);
 
@@ -676,7 +687,7 @@ fn trialll_par<R: RngCore>(
     return final_convex_set;
 }
 
-fn find_convex_subcircuit<R: RngCore>(
+fn find_convex_subcircuit_slow<R: RngCore>(
     graph: &Graph<usize, usize>,
     ell_out: usize,
     max_iterations: usize,
@@ -859,7 +870,7 @@ where
 
     let convex_subset = timed!(
         "Find convex subcircuit",
-        match find_convex_subcircuit(&skeleton_graph, ell_out, max_convex_iterations, rng) {
+        match find_convex_subcircuit_slow(&skeleton_graph, ell_out, max_convex_iterations, rng) {
             Some(convex_subset) => convex_subset,
             None => return false,
         }
@@ -1392,7 +1403,7 @@ mod tests {
             let skeleton_graph = circuit_to_skeleton_graph(&circuit);
 
             let convex_subgraph =
-                find_convex_subcircuit(&skeleton_graph, ell_out, max_iterations, &mut rng);
+                find_convex_subcircuit_slow(&skeleton_graph, ell_out, max_iterations, &mut rng);
 
             match convex_subgraph {
                 Some(convex_subgraph) => {
@@ -1489,12 +1500,37 @@ mod tests {
 
         let mut stats = Stats::new();
 
-        for _ in 0..100 {
+        for _ in 0..1 {
             let now = std::time::Instant::now();
-            let _ = trialll(&skeleton_graph, ell_out, max_iterations, &mut rng).unwrap();
+            let _ = find_convex_fast(&skeleton_graph, ell_out, max_iterations, &mut rng).unwrap();
             stats.add_sample(now.elapsed().as_secs_f64());
         }
 
         println!("Average find convex runtime: {}", stats.average());
+    }
+
+    #[test]
+    fn time_blah() {
+        env_logger::init();
+        let gates = 5000;
+        let n = 64;
+        let ell_out = 4;
+        let mut rng = thread_rng();
+        let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
+        let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+
+        let mut stats = Stats::new();
+
+        for _ in 0..1000 {
+            let start_node = NodeIndex::from(rng.gen_range(0..skeleton_graph.node_count()) as u32);
+            let mut convex_set = HashSet::new();
+            convex_set.insert(start_node);
+            let now = std::time::Instant::now();
+            // let _ = trialll(&skeleton_graph, ell_out, max_iterations, &mut rng).unwrap();
+            let _ = blah(ell_out, &mut convex_set, &skeleton_graph);
+            stats.add_sample(now.elapsed().as_secs_f64());
+        }
+
+        println!("Average blah runtime: {}", stats.average());
     }
 }
