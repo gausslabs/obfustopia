@@ -1,5 +1,6 @@
 use std::{collections::HashMap, fmt::Display};
 
+use bitvec::{array::BitArray, vec::BitVec};
 use itertools::Itertools;
 use petgraph::{graph::NodeIndex, Graph};
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,27 @@ impl<const N: usize, D> BaseGate<N, D> {
             controls,
             // control_func,
         }
+    }
+
+    #[inline(always)]
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    #[inline(always)]
+    pub fn target(&self) -> D
+    where
+        D: Copy,
+    {
+        self.target
+    }
+
+    #[inline(always)]
+    pub fn controls(&self) -> [D; N]
+    where
+        D: Copy,
+    {
+        self.controls
     }
 
     // pub(crate) fn control_func(&self) -> &fn(&[D; N], &[bool]) -> bool {
@@ -92,6 +114,15 @@ where
     pub fn run(&self, inputs: &mut [bool]) {
         self.gates.iter().for_each(|g| {
             g.run(inputs);
+        });
+    }
+}
+
+impl Circuit<BaseGate<2, u8>> {
+    pub fn run_fast(&self, inputs: &mut [bool]) {
+        self.gates.iter().for_each(|g| {
+            inputs[g.target() as usize] ^=
+                inputs[g.controls()[0] as usize] & inputs[g.controls()[1] as usize]
         });
     }
 }
@@ -148,6 +179,10 @@ impl<G> Circuit<G> {
 
     pub fn gates(&self) -> &[G] {
         self.gates.as_ref()
+    }
+
+    pub fn gates_mut(&mut self) -> &mut [G] {
+        self.gates.as_mut()
     }
 }
 
