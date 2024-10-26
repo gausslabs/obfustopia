@@ -4,14 +4,13 @@ use itertools::{izip, Itertools};
 use num_traits::Zero;
 use petgraph::{
     algo::toposort,
-    graph::{Node, NodeIndex},
-    visit::{EdgeRef, IntoEdgesDirected},
-    Direction::{self, Outgoing},
+    graph::NodeIndex,
+    visit::EdgeRef,
+    Direction::{self},
     Graph,
 };
 use rand::{
     distributions::{uniform::SampleUniform, Uniform},
-    seq::SliceRandom,
     Rng, RngCore,
 };
 use sha2::{Digest, Sha256};
@@ -19,9 +18,9 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::{Debug, Display},
     hash::Hash,
-    iter,
 };
 
+pub mod algo;
 pub mod circuit;
 
 #[macro_export]
@@ -923,6 +922,25 @@ fn circuit_to_collision_sets<G: Gate>(circuit: &Circuit<G>) -> Vec<HashSet<usize
         all_collision_sets.push(collision_set_i);
     }
 
+    // Remove intsecting collisions. That is i can collide with j iff there is no k such that i < k < j with which both i & j collide
+    for (i, _) in circuit.gates().iter().enumerate() {
+        // Don't update collision set i in place. Otherwise situations like the following are missed: Let i collide with j < k < l. '
+        // If i^th collision set is updated in place then k is removed from the set after checking against j^th collision set. And i^th
+        // collision set will never be checked against k. Hence, an incorrect (or say unecessary) dependency will be drawn from i to l.
+        // let mut collisions_set_i = all_collision_sets[i].clone();
+        let mut to_remove = HashSet::new();
+        for (j, _) in circuit.gates().iter().enumerate().skip(i + 1) {
+            if all_collision_sets[i].contains(&j) {
+                // remove id k from set of i iff k is in set of j (ie j, where j < k, collides with k)
+                for node in all_collision_sets[i].intersection(&all_collision_sets[j]) {
+                    to_remove.insert(*node);
+                }
+                // collisions_set_i.retain(|k| !all_collision_sets[j].contains(k));
+            }
+        }
+        all_collision_sets[i].retain(|v| !to_remove.contains(v));
+    }
+
     return all_collision_sets;
 }
 
@@ -1348,13 +1366,8 @@ pub fn check_probabilisitic_equivalence<G, R: RngCore>(
 #[cfg(test)]
 mod tests {
 
-    use std::iter::Sum;
-
-    use petgraph::{
-        algo::{all_simple_paths, connected_components, has_path_connecting, toposort, DfsSpace},
-        dot::{Config, Dot},
-        graph,
-        visit::{depth_first_search, Control, Dfs},
+    use petgraph::algo::{
+        all_simple_paths, connected_components, has_path_connecting, toposort, DfsSpace,
     };
     use rand::{thread_rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
@@ -1576,7 +1589,7 @@ mod tests {
         }
     }
 
-    struct Stats<T> {
+    pub(crate) struct Stats<T> {
         samples: Vec<T>,
     }
 
@@ -1585,17 +1598,17 @@ mod tests {
         T: for<'a> std::iter::Sum<&'a T> + TryInto<f64>,
         <T as TryInto<f64>>::Error: Debug,
     {
-        fn new() -> Stats<T> {
+        pub(crate) fn new() -> Stats<T> {
             Self {
                 samples: Default::default(),
             }
         }
 
-        fn add_sample(&mut self, sample: T) {
+        pub(crate) fn add_sample(&mut self, sample: T) {
             self.samples.push(sample);
         }
 
-        fn average(&self) -> f64 {
+        pub(crate) fn average(&self) -> f64 {
             let s: T = self.samples.iter().sum();
             let s: f64 = s.try_into().unwrap();
             s / self.samples.len() as f64
@@ -1730,34 +1743,83 @@ mod tests {
         let skeleton_graph = circuit_to_skeleton_graph(&circuit);
 
         let mut stats = Stats::new();
+        // let mut stats1 = Stats::new();
 
-        for _ in 0..1 {
-            let start_node = NodeIndex::from(rng.gen_range(0..skeleton_graph.node_count()) as u32);
+        for _ in 0..10 {
+            let start_node = NodeIndex::from(rng.gen_range(15000..17000) as u32);
+            println!("Node: {:?}", start_node);
             let now = std::time::Instant::now();
-            let mut path = vec![];
-            dfs(
+            // let mut path = vec![];
+            // dfs(
+            //     start_node,
+            //     &mut HashSet::new(),
+            //     &mut HashSet::new(),
+            //     &mut path,
+            //     &skeleton_graph,
+            //     Direction::Incoming,
+            // );
+            // dfs(
+            //     start_node,
+            //     &mut HashSet::new(),
+            //     &mut HashSet::new(),
+            //     &mut path,
+            //     &skeleton_graph,
+            //     Direction::Outgoing,
+            // );
+
+            dfs_only(
                 start_node,
                 &mut HashSet::new(),
-                &mut HashSet::new(),
-                &mut path,
                 &skeleton_graph,
                 Direction::Incoming,
             );
-            dfs(
-                start_node,
-                &mut HashSet::new(),
-                &mut HashSet::new(),
-                &mut path,
-                &skeleton_graph,
-                Direction::Outgoing,
-            );
+
+            // dfs_only(
+            //     start_node,
+            //     &mut HashSet::new(),
+            //     &skeleton_graph,
+            //     Direction::Incoming,
+            // );
             stats.add_sample(now.elapsed().as_secs_f64());
+
+            // let now = std::time::Instant::now();
+            // dfs_only(
+            //     start_node,
+            //     &mut HashSet::new(),
+            //     &skeleton_graph,
+            //     Direction::Outgoing,
+            // );
+            // stats1.add_sample(now.elapsed().as_secs_f64());
         }
 
         println!(
             "Average traverse preds and succs with normal graph runtime: {}",
             stats.average()
         );
+    }
+
+    #[test]
+    fn iteration_time() {
+        let gates = 50000;
+        let n = 64;
+        let ell_out = 4;
+        let mut rng = thread_rng();
+        let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
+        let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+        let mut stats = Stats::new();
+        // let mut stats1 = Stats::new();
+
+        for _ in 0..10 {
+            let now = std::time::Instant::now();
+            for node in skeleton_graph.node_indices() {
+                if node.index() == (gates + 1) {
+                    assert!(false);
+                }
+            }
+            stats.add_sample(now.elapsed().as_secs_f64());
+        }
+
+        println!("Iteration runtime: {}", stats.average());
     }
 
     #[test]
