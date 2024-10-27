@@ -1149,6 +1149,7 @@ where
         }
     }
 
+    #[cfg(feature = "trace")]
     log::trace!("       New edges count: {}", new_edges.len());
 
     // Update the graph with new edges
@@ -1205,6 +1206,7 @@ where
         // only retain immediate successors that are no more connected with imm pred via C^in
         imm_succ_set_cout.retain(|n| !imm_succ_set_cin.contains(n));
 
+        #[cfg(feature = "trace")]
         {
             if !imm_succ_set_cout.is_empty() {
                 log::trace!(
@@ -1288,6 +1290,8 @@ where
     for e in edges_to_add {
         new_edges.extend(e);
     }
+
+    #[cfg(feature = "trace")]
     log::trace!(
         "       New edges count for missing links: {}",
         new_edges.len()
