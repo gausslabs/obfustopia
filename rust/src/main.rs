@@ -8,9 +8,9 @@ use petgraph::{
 };
 use rand::{distributions::Uniform, thread_rng, Rng, RngCore};
 use rust::{
-    circuit_to_skeleton_graph, local_mixing_step, node_indices_to_gate_ids,
-    sample_circuit_with_base_gate, test_circuit_equivalance, test_circuit_equivalance_for_debug,
-    BaseGate, Circuit, Gate,
+    circuit::{circuit_to_skeleton_graph, sample_circuit_with_base_gate, BaseGate, Circuit, Gate},
+    local_mixing_step, node_indices_to_gate_ids, test_circuit_equivalance,
+    test_circuit_equivalance_for_debug,
 };
 
 fn strategy1<R: RngCore>(

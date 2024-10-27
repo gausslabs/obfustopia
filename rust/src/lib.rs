@@ -1,10 +1,12 @@
+use crate::circuit::{BaseGate, Circuit, Gate};
+use circuit::{circuit_to_collision_sets, find_replacement_circuit};
 use either::Either::{Left, Right};
 use itertools::{izip, Itertools};
 use num_traits::Zero;
 use petgraph::{
     dot::{Config, Dot},
     graph::{self, NodeIndex},
-    visit::{EdgeRef, NodeIndexable},
+    visit::EdgeRef,
     Direction::{self, Outgoing},
     Graph,
 };
@@ -12,174 +14,35 @@ use rand::{
     distributions::{uniform::SampleUniform, Uniform},
     Rng, RngCore,
 };
-use sha2::{Digest, Sha256};
+use rayon::iter::{ParallelBridge, ParallelIterator};
+use rustc_hash::FxHasher;
+
 use std::{
     collections::{HashMap, HashSet},
     fmt::{Debug, Display},
-    hash::Hash,
-    path,
+    hash::{Hash, Hasher},
 };
 
-pub trait Gate {
-    type Input: ?Sized;
-    type Target;
-    type Controls;
+pub mod circuit;
 
-    fn run(&self, input: &mut Self::Input);
-    fn target(&self) -> Self::Target;
-    fn controls(&self) -> &Self::Controls;
-    fn check_collision(&self, other: &Self) -> bool;
-    fn id(&self) -> usize;
-}
-
-#[derive(Clone)]
-pub struct BaseGate<const N: usize, D> {
-    id: usize,
-    target: D,
-    controls: [D; N],
-    control_func: fn(&[D; N], &[bool]) -> bool,
-}
-
-impl<const N: usize, D> Gate for BaseGate<N, D>
-where
-    D: Into<usize> + Copy + PartialEq,
-{
-    type Input = [bool];
-    type Controls = [D; N];
-    type Target = D;
-
-    fn run(&self, input: &mut Self::Input) {
-        // control bit XOR target
-        input[self.target.into()] =
-            input[self.target.into()] ^ (self.control_func)(&self.controls, input);
-    }
-
-    fn controls(&self) -> &Self::Controls {
-        &self.controls
-    }
-
-    fn target(&self) -> Self::Target {
-        self.target
-    }
-
-    fn check_collision(&self, other: &Self) -> bool {
-        other.controls().contains(&self.target()) || self.controls().contains(&other.target())
-    }
-
-    fn id(&self) -> usize {
-        self.id
-    }
-}
-
-pub struct Circuit<G> {
-    gates: Vec<G>,
-    n: usize,
-}
-
-impl<G> Circuit<G>
-where
-    G: Gate<Input = [bool]>,
-{
-    pub fn run(&self, inputs: &mut [bool]) {
-        self.gates.iter().for_each(|g| {
-            g.run(inputs);
-        });
-    }
-}
-
-impl<G> Circuit<G>
-where
-    G: Clone,
-{
-    pub fn split_circuit(&self, at_gate: usize) -> (Circuit<G>, Circuit<G>) {
-        assert!(at_gate < self.gates.len());
-        let mut first_gates = self.gates.clone();
-        let second_gates = first_gates.split_off(at_gate);
-        (
-            Circuit {
-                gates: first_gates,
-                n: self.n,
-            },
-            Circuit {
-                gates: second_gates,
-                n: self.n,
-            },
-        )
-    }
-
-    pub fn from_top_sorted_nodes(
-        top_sorted_nodes: &[NodeIndex],
-        skeleton_graph: &Graph<usize, usize>,
-        gate_map: &HashMap<usize, G>,
-        n: usize,
-    ) -> Self {
-        Circuit::new(
-            top_sorted_nodes
-                .iter()
-                .map(|node| {
-                    gate_map
-                        .get(skeleton_graph.node_weight(*node).unwrap())
-                        .unwrap()
-                        .to_owned()
-                })
-                .collect_vec(),
-            n,
-        )
-    }
-}
-
-impl<G> Circuit<G> {
-    pub fn new(gates: Vec<G>, n: usize) -> Self {
-        Circuit { gates, n }
-    }
-
-    pub fn n(&self) -> usize {
-        self.n
-    }
-
-    pub fn gates(&self) -> &[G] {
-        self.gates.as_ref()
-    }
-}
-
-impl<const N: usize, D> Display for Circuit<BaseGate<N, D>>
-where
-    D: Into<usize> + Copy + PartialEq,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f)?;
-        writeln!(f, "{:-<15}", "")?;
-        for i in 0..self.n {
-            write!(f, "{:2}", i)?;
-        }
-        writeln!(f)?;
-
-        writeln!(f, "{:-<15}", "")?;
-
-        // Print 20 rows of values from 0 to 10
-        for g in self.gates.iter() {
-            write!(f, "{:1}", "")?;
-            for j in 0..self.n {
-                let controls = g
-                    .controls()
-                    .iter()
-                    .map(|v| (*v).into())
-                    .collect::<Vec<usize>>();
-                if g.target().into() == j {
-                    write!(f, "{:2}", "O")?;
-                } else if controls.contains(&j) {
-                    write!(f, "{:2}", "I")?;
-                } else {
-                    write!(f, "{:2}", "x")?;
-                }
-            }
-            writeln!(f)?;
-        }
-
-        writeln!(f, "{:-<15}", "")?;
-        writeln!(f)?;
-        Ok(())
-    }
+#[macro_export]
+macro_rules! timed {
+    ($description:expr, $code:expr) => {{
+        #[cfg(feature = "time")]
+        let start = {
+            log::info!(
+                "[Time] {} {} ",
+                $description,
+                "·".repeat(70 - $description.len())
+            );
+            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            std::time::Instant::now()
+        };
+        let out = $code;
+        #[cfg(feature = "time")]
+        log::info!("{:?}", start.elapsed());
+        out
+    }};
 }
 
 pub fn node_indices_to_gate_ids<'a, I>(nodes: I, graph: &Graph<usize, usize>) -> Vec<usize>
@@ -206,287 +69,6 @@ where
             )
         })
         .collect_vec()
-}
-
-fn input_value_to_bitstring_map(n: usize) -> HashMap<usize, Vec<bool>> {
-    assert!(n < 20, "{n} >= 20; Too big!");
-    let mut map = HashMap::new();
-    for i in 0..1usize << n {
-        let mut bitstring = vec![false; n];
-        for j in 0..n {
-            bitstring[j] = ((i >> j) & 1) == 1
-        }
-        map.insert(i, bitstring);
-    }
-    return map;
-}
-
-fn sample_m_unique_values<const M: usize, D, R: RngCore>(
-    rng: &mut R,
-    distribution: &Uniform<D>,
-) -> HashSet<D>
-where
-    D: SampleUniform + Eq + Hash + Copy + Zero,
-{
-    // Note(Jay): I removed the hash set way because iterator over hashset is in random order which is not good if we want to debug with a seeded rng.
-    let mut values = HashSet::new();
-    // let mut i = 0;
-    // while i < M {
-    //     let sample = rng.sample(distribution);
-    //     if !values.contains(&sample) {
-    //         values[i] = sample;
-    //     }
-    //     i += 1;
-    // }
-    while values.len() < M {
-        let sample = rng.sample(distribution);
-        values.insert(sample);
-    }
-    return values;
-}
-
-fn permutation_map<G>(
-    circuit: &Circuit<G>,
-    input_value_to_bitstring_map: &HashMap<usize, Vec<bool>>,
-) -> HashMap<usize, Vec<bool>>
-where
-    G: Gate<Input = [bool]>,
-{
-    let mut permutation_map = HashMap::new();
-    for (value, bitstring) in input_value_to_bitstring_map.iter() {
-        let mut inputs = bitstring.clone();
-        circuit.run(&mut inputs);
-        // assert_ne!(bitstring_map.get(&i).unwrap(), &inputs);
-        permutation_map.insert(*value, inputs);
-    }
-    return permutation_map;
-}
-
-pub fn sample_circuit_with_base_gate<const MAX_K: usize, D, R: RngCore>(
-    gate_count: usize,
-    n: D,
-    two_prob: f64,
-    rng: &mut R,
-) -> (Circuit<BaseGate<MAX_K, D>>, String)
-where
-    D: Zero + SampleUniform + Copy + Eq + Hash + Debug + Display + Into<usize>,
-{
-    let three_replacement_cost = 4; // 3-way gates can be decomposed into 4 2-way gates
-    let two_replacement_cost = 1;
-
-    let distribution = Uniform::new(D::zero(), n);
-    let mut gates = Vec::with_capacity(gate_count);
-    let mut curr_gate = 0;
-    let mut sample_trace = Sha256::new();
-    let mut id = 0;
-
-    while curr_gate < gate_count {
-        if MAX_K == 2 {
-            assert!(two_prob == 1.0);
-            let unique_vals = sample_m_unique_values::<3, _, _>(rng, &distribution);
-            let mut iter = unique_vals.into_iter();
-            let target = iter.next().unwrap();
-            let mut controls = [D::zero(); MAX_K];
-            controls[0] = iter.next().unwrap();
-            controls[1] = iter.next().unwrap();
-
-            sample_trace.update(format!("TWO{target}{}{}", controls[0], controls[1],));
-
-            curr_gate += two_replacement_cost;
-
-            gates.push(BaseGate::<MAX_K, D> {
-                id,
-                target,
-                controls,
-                control_func: (|controls, inputs| {
-                    inputs[controls[0].into()] & inputs[controls[1].into()]
-                }),
-            });
-        } else {
-            assert!(MAX_K == 3);
-            let if_true_three = rng.gen_bool(1.0 - two_prob);
-            if if_true_three {
-                let unique_vals = sample_m_unique_values::<4, _, _>(rng, &distribution);
-
-                let mut iter = unique_vals.into_iter();
-                let target = iter.next().unwrap();
-                let mut controls = [D::zero(); MAX_K];
-                for i in 0..MAX_K {
-                    controls[i] = iter.next().unwrap();
-                }
-
-                sample_trace.update(format!(
-                    "THREE{target}{}{}{}",
-                    controls[0], controls[1], controls[2]
-                ));
-
-                curr_gate += three_replacement_cost;
-
-                gates.push(BaseGate::<MAX_K, D> {
-                    id,
-                    target,
-                    controls,
-                    control_func: (|controls, inputs| {
-                        inputs[controls[0].into()]
-                            & inputs[controls[1].into()]
-                            & inputs[controls[2].into()]
-                    }),
-                });
-            } else {
-                // sample 2 way CNOTs
-                let unique_vals = sample_m_unique_values::<3, _, _>(rng, &distribution);
-
-                let mut iter = unique_vals.into_iter();
-                let target = iter.next().unwrap();
-                let mut controls = [D::zero(); MAX_K];
-                for i in 0..MAX_K - 1 {
-                    controls[i] = iter.next().unwrap();
-                }
-                // With MAX_K = 3, if any gate has 2 controls then set the last control = n. n indicates useless slot.
-                controls[2] = n;
-
-                sample_trace.update(format!("TWO{target}{}{}", controls[0], controls[1],));
-
-                curr_gate += two_replacement_cost;
-
-                gates.push(BaseGate::<MAX_K, D> {
-                    id,
-                    target,
-                    controls,
-                    control_func: (|controls, inputs| {
-                        inputs[controls[0].into()] & inputs[controls[1].into()]
-                    }),
-                });
-            };
-        }
-
-        id += 1;
-    }
-
-    let sample_trace: String = format!("{:X}", sample_trace.finalize());
-
-    (Circuit { gates, n: n.into() }, sample_trace)
-}
-
-/// Checks whether collisions set of any circuit is weakly connected.
-///
-/// Any directed graph is weakly connected if the underlying undirected graph is fully connected.
-fn is_collisions_set_weakly_connected(collisions_set: &[HashSet<usize>]) -> bool {
-    let gate_count = collisions_set.len();
-    // row major matrix
-    let mut undirected_graph = vec![false; gate_count * gate_count];
-    for (i, set_i) in collisions_set.iter().enumerate() {
-        for j in set_i {
-            assert!(i < gate_count);
-            assert!(*j < gate_count, "j={j} n={gate_count}");
-            // graph[i][j] = true
-            // graph[j][i] = true
-            undirected_graph[i * gate_count + j] = true;
-            undirected_graph[j * gate_count + i] = true;
-        }
-    }
-
-    let mut all_nodes: HashSet<usize> = HashSet::from_iter(0..gate_count);
-    let mut nodes_visited: HashSet<usize> = HashSet::new();
-    let mut stack = vec![0];
-    let mut is_weakly_connected = true;
-    while nodes_visited.len() < gate_count {
-        let curr_node = stack.pop();
-        match curr_node {
-            Some(curr_node) => {
-                for k in all_nodes.iter() {
-                    let index = curr_node * gate_count + k;
-                    if undirected_graph[index] {
-                        nodes_visited.insert(*k);
-                        stack.push(*k);
-                    }
-                }
-                nodes_visited.insert(curr_node);
-                all_nodes.remove(&curr_node);
-            }
-            None => {
-                is_weakly_connected = false;
-                break;
-            }
-        }
-    }
-
-    is_weakly_connected
-}
-
-fn find_replacement_circuit<const MAX_K: usize, const WC: bool, D, R: RngCore>(
-    circuit: &Circuit<BaseGate<MAX_K, D>>,
-    ell_in: usize,
-    n: D,
-    two_prob: f64,
-    max_iterations: usize,
-    rng: &mut R,
-) -> Option<Circuit<BaseGate<MAX_K, D>>>
-where
-    D: Zero + SampleUniform + Copy + Eq + Hash + Display + Debug + Into<usize>,
-{
-    let input_value_to_bitstring_map = input_value_to_bitstring_map(circuit.n);
-    let permutation_map = permutation_map(circuit, &input_value_to_bitstring_map);
-
-    let mut curr_iter = 0;
-    let mut replacement_circuit = None;
-    let mut visited_circuits = HashMap::new();
-
-    while curr_iter < max_iterations {
-        let (random_circuit, circuit_trace) =
-            sample_circuit_with_base_gate::<MAX_K, D, _>(ell_in, n, two_prob, rng);
-
-        if visited_circuits.contains_key(&circuit_trace) {
-            let count = visited_circuits.get_mut(&circuit_trace).unwrap();
-            *count += 1;
-        } else {
-            visited_circuits.insert(circuit_trace, 1usize);
-
-            let mut funtionally_equivalent = true;
-            for (value, bitstring) in input_value_to_bitstring_map.iter() {
-                let mut inputs = bitstring.to_vec();
-                random_circuit.run(&mut inputs);
-
-                if &inputs != permutation_map.get(value).unwrap() {
-                    funtionally_equivalent = false;
-                    break;
-                }
-            }
-
-            if funtionally_equivalent && WC {
-                let collisions_set = circuit_to_collision_sets(&random_circuit);
-                let is_weakly_connected = is_collisions_set_weakly_connected(&collisions_set);
-                funtionally_equivalent = is_weakly_connected;
-            }
-
-            if funtionally_equivalent {
-                replacement_circuit = Some(random_circuit);
-                break;
-            }
-        }
-
-        curr_iter += 1;
-
-        #[cfg(feature = "trace")]
-        if curr_iter % 100000 == 0 {
-            log::trace!("[find_replacement_circuit] 100K iterations done");
-        }
-
-        // if curr_iter == max_iterations {
-        //     replacement_circuit = Some(random_circuit);
-        // }
-    }
-
-    // let mut visited_freq = vec![0; 1000];
-    // visited_circuits.iter().for_each(|(_k, v)| {
-    //     visited_freq[*v] += 1;
-    // });
-
-    #[cfg(feature = "trace")]
-    log::trace!("Finding replacement total iterations: {}", curr_iter);
-    // println!("Visited frequency: {:?}", visited_freq);
-
-    return replacement_circuit;
 }
 
 /// Find all paths from curr_node to sink
@@ -649,57 +231,6 @@ fn find_convex_subcircuit<R: RngCore>(
     return final_convex_set;
 }
 
-fn circuit_to_collision_sets<G: Gate>(circuit: &Circuit<G>) -> Vec<HashSet<usize>> {
-    let mut all_collision_sets = Vec::with_capacity(circuit.gates.len());
-    for (i, gi) in circuit.gates.iter().enumerate() {
-        let mut collision_set_i = HashSet::new();
-        for (j, gj) in (circuit.gates.iter().enumerate()).skip(i + 1) {
-            if gi.check_collision(gj) {
-                collision_set_i.insert(j);
-            }
-        }
-        all_collision_sets.push(collision_set_i);
-    }
-
-    // Remove intsecting collisions. That is i can collide with j iff there is no k such that i < k < j with which both i & j collide
-    for (i, _) in circuit.gates.iter().enumerate() {
-        // Don't update collision set i in place. Otherwise situations like the following are missed: Let i collide with j < k < l. '
-        // If i^th collision set is updated in place then k is removed from the set after checking against j^th collision set. And i^th
-        // collision set will never be checked against k. Hence, an incorrect (or say unecessary) dependency will be drawn from i to l.
-        let mut collisions_set_i = all_collision_sets[i].clone();
-        for (j, _) in circuit.gates.iter().enumerate().skip(i + 1) {
-            if all_collision_sets[i].contains(&j) {
-                // remove id k from set of i iff k is in set of j (ie j, where j < k, collides with k)
-                collisions_set_i.retain(|k| !all_collision_sets[j].contains(k));
-            }
-        }
-        all_collision_sets[i] = collisions_set_i;
-    }
-
-    return all_collision_sets;
-}
-
-pub fn circuit_to_skeleton_graph<G: Gate>(circuit: &Circuit<G>) -> Graph<usize, usize> {
-    let all_collision_sets = circuit_to_collision_sets(circuit);
-
-    let mut skeleton = Graph::<usize, usize>::new();
-    // add nodes with weights as ids
-    let nodes = circuit
-        .gates
-        .iter()
-        .map(|g| skeleton.add_node(g.id()))
-        .collect_vec();
-    let edges = all_collision_sets.iter().enumerate().flat_map(|(i, set)| {
-        // FIXME(Jay): Had to collect_vec due to lifetime issues
-        let v = set.iter().map(|j| (nodes[i], nodes[*j])).collect_vec();
-        v.into_iter()
-    });
-
-    skeleton.extend_with_edges(edges);
-
-    return skeleton;
-}
-
 fn find_all_predecessors(node: NodeIndex, graph: &Graph<usize, usize>) -> HashSet<NodeIndex> {
     let mut preds = HashSet::new();
     // First find all immediate predecessors and successors
@@ -716,6 +247,46 @@ fn find_all_predecessors(node: NodeIndex, graph: &Graph<usize, usize>) -> HashSe
         );
     }
     return preds;
+}
+
+fn find_outsiders(
+    graph: &Graph<usize, usize>,
+    imm_predecessors: &HashSet<NodeIndex>,
+    imm_successors: &HashSet<NodeIndex>,
+    c_out: &HashSet<NodeIndex>,
+) -> HashSet<NodeIndex> {
+    let mut all_preds = HashSet::new();
+    let mut path = vec![];
+    for node in imm_predecessors.iter() {
+        dfs(
+            *node,
+            &mut HashSet::new(),
+            &mut all_preds,
+            &mut path,
+            &graph,
+            Direction::Incoming,
+        );
+    }
+    assert!(path.len() == 0);
+    let mut all_succs = HashSet::new();
+    for node in imm_successors.iter() {
+        dfs(
+            *node,
+            &mut HashSet::new(),
+            &mut all_succs,
+            &mut path,
+            &graph,
+            Direction::Outgoing,
+        );
+    }
+
+    let mut all_outsiders = HashSet::new();
+    for node in graph.node_indices() {
+        if !all_preds.contains(&node) && !all_succs.contains(&node) && !c_out.contains(&node) {
+            all_outsiders.insert(node);
+        }
+    }
+    return all_outsiders;
 }
 
 fn adjust_collision_with_dependency_chain<const MAX_K: usize, const IS_PRED: bool, D>(
@@ -841,44 +412,98 @@ fn adjust_collision_with_dependency_chain<const MAX_K: usize, const IS_PRED: boo
     }
 }
 
-fn outsiders(
+fn adjust_collision_with_dependency_chain_with_prune<const MAX_K: usize, D>(
+    curr_node: NodeIndex,
+    dependency_chain: PathWithIdentityRef,
     graph: &Graph<usize, usize>,
-    imm_predecessors: &HashSet<NodeIndex>,
-    imm_successors: &HashSet<NodeIndex>,
-    c_out: &HashSet<NodeIndex>,
-) -> HashSet<NodeIndex> {
-    let mut all_preds = HashSet::new();
-    let mut path = vec![];
-    for node in imm_predecessors.iter() {
-        dfs(
-            *node,
-            &mut HashSet::new(),
-            &mut all_preds,
-            &mut path,
-            &graph,
-            Direction::Incoming,
-        );
-    }
-    assert!(path.len() == 0);
-    let mut all_succs = HashSet::new();
-    for node in imm_successors.iter() {
-        dfs(
-            *node,
-            &mut HashSet::new(),
-            &mut all_succs,
-            &mut path,
-            &graph,
-            Direction::Outgoing,
-        );
+    gate_map: &HashMap<usize, BaseGate<MAX_K, D>>,
+    new_edges: &mut HashSet<(NodeIndex, NodeIndex)>,
+    depth: usize,
+    visited: &mut HashSet<(NodeIndex, u64)>,
+) where
+    D: Copy + PartialEq + Into<usize>,
+{
+    #[cfg(feature = "trace")]
+    {
+        log::info!("        Call depth: {depth}");
+        log::info!("        Curr node: {:?}", curr_node);
+        log::info!("        Dependency chain: {:?}", dependency_chain);
     }
 
-    let mut all_outsiders = HashSet::new();
-    for node in graph.node_indices() {
-        if !all_preds.contains(&node) && !all_succs.contains(&node) && !c_out.contains(&node) {
-            all_outsiders.insert(node);
+    if dependency_chain.is_empty() {
+        // log::trace!("           Empty!");
+        return;
+    }
+
+    if visited.contains(&(curr_node, dependency_chain.identity().unwrap())) {
+        // log::trace!("           Collision!");
+        return;
+    }
+
+    visited.insert((curr_node, dependency_chain.identity().unwrap()));
+
+    let curr_gate = gate_map.get(graph.node_weight(curr_node).unwrap()).unwrap();
+    let mut collding_gate_index = None;
+
+    for index in 0..dependency_chain.path().len() {
+        let other_gate = gate_map
+            .get(graph.node_weight(dependency_chain.path()[index]).unwrap())
+            .unwrap();
+        if curr_gate.check_collision(other_gate) {
+            collding_gate_index = Some(index);
+            break;
+        }
+        assert!(collding_gate_index.is_none());
+    }
+
+    let new_dep = match collding_gate_index {
+        Some(colliding_gate_index) => {
+            #[cfg(feature = "trace")]
+            log::trace!(
+                "       Found collision with node {:?} at index {}",
+                graph
+                    .node_weight(dependency_chain[colliding_gate_index])
+                    .unwrap(),
+                colliding_gate_index
+            );
+
+            // add collision edge from curr_node to node in dependency chain or node in dep chain to curr_node
+            #[cfg(feature = "trace")]
+            log::trace!(
+                "       Adding new edge (pred to gate): {:?}",
+                (
+                    graph.node_weight(curr_node).unwrap(),
+                    graph
+                        .node_weight(dependency_chain[colliding_gate_index])
+                        .unwrap()
+                )
+            );
+
+            new_edges.insert((curr_node, dependency_chain.path()[colliding_gate_index]));
+
+            dependency_chain.drop_at(colliding_gate_index)
+        }
+        None => dependency_chain.clone(),
+    };
+
+    // log::info!(
+    //     "        Depth={depth} DDD {}",
+    //     new_dep.len() == dependency_chain.len()
+    // );
+
+    if !new_dep.is_empty() {
+        for next_node in graph.neighbors_directed(curr_node, Direction::Incoming) {
+            adjust_collision_with_dependency_chain_with_prune::<MAX_K, D>(
+                next_node,
+                new_dep,
+                graph,
+                gate_map,
+                new_edges,
+                depth + 1,
+                visited,
+            );
         }
     }
-    return all_outsiders;
 }
 
 fn dfs_within_convex_set(
@@ -911,6 +536,60 @@ fn dfs_within_convex_set(
     visited.insert(curr_node);
 }
 
+#[derive(Debug)]
+struct PathWithIdentity {
+    path: Vec<NodeIndex>,
+    path_hashes: Vec<u64>,
+}
+
+impl PathWithIdentity {
+    fn new(path: Vec<NodeIndex>) -> Self {
+        let mut hasher = FxHasher::default();
+
+        let mut path_hashes = Vec::with_capacity(path.len());
+        for node in path.iter() {
+            hasher.write_usize(node.index());
+            path_hashes.push(hasher.finish());
+        }
+
+        Self { path, path_hashes }
+    }
+
+    fn as_ref(&self) -> PathWithIdentityRef {
+        PathWithIdentityRef {
+            path: &self.path,
+            path_hashes: &self.path_hashes,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PathWithIdentityRef<'a> {
+    path: &'a [NodeIndex],
+    path_hashes: &'a [u64],
+}
+
+impl<'a> PathWithIdentityRef<'a> {
+    fn drop_at(&self, index: usize) -> Self {
+        Self {
+            path: &self.path[..index],
+            path_hashes: &self.path_hashes[..index],
+        }
+    }
+
+    fn identity(&self) -> Option<u64> {
+        self.path_hashes.last().copied()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.path.len() == 0
+    }
+
+    fn path(&self) -> &[NodeIndex] {
+        &self.path
+    }
+}
+
 fn dfs_till_collision<const MAX_K: usize, D>(
     target_gate: &BaseGate<MAX_K, D>,
     curr_node: NodeIndex,
@@ -930,13 +609,23 @@ fn dfs_till_collision<const MAX_K: usize, D>(
     let curr_gate = gate_map.get(graph.node_weight(curr_node).unwrap()).unwrap();
 
     if curr_gate.check_collision(target_gate) {
-        if path.len() != 0 {
-            assert!(*path.last().unwrap() != curr_node);
-        }
+        // if path.len() != 0 {
+        // assert!(*path.last().unwrap() != curr_node);
+        // }
         dependency_chains.push(path.clone());
         colliding_nodes.insert(curr_node);
         return;
     }
+
+    // if graph
+    //     .neighbors_directed(curr_node, Direction::Outgoing)
+    //     .count()
+    //     == 0
+    // {
+    //     log::trace!("       Zero outgoin: {:?}", &path);
+    //     dependency_chains.push(path.clone());
+    //     return;
+    // }
 
     path.push(curr_node);
     for next_node in graph.neighbors_directed(curr_node, Direction::Outgoing) {
@@ -966,6 +655,7 @@ fn adjust_dependencies_for_prev_connected_nodes<const MAX_K: usize, D>(
 where
     D: Copy + PartialEq + Into<usize>,
 {
+    #[cfg(feature = "trace")]
     log::trace!(
         "@@@@ Connecting prev connect pred {} succ {} @@@@@",
         graph.node_weight(pred).unwrap(),
@@ -978,6 +668,8 @@ where
     // Depedency chains to be adjusted with pred's predecessors
     let mut nodes_colliding_with_pred = HashSet::new();
     let mut dependency_chains = vec![];
+    // timed!(
+    // "        [Making connectinos] Part 1",
     dfs_till_collision(
         &pred_gate,
         succ,
@@ -988,12 +680,19 @@ where
         &mut dependency_chains,
         &mut HashSet::new(),
     );
+    // );
+
+    let dependency_chains_with_identity = dependency_chains
+        .into_iter()
+        .map(|dep| PathWithIdentity::new(dep))
+        .collect_vec();
 
     let mut new_edges = HashSet::new();
     for node in nodes_colliding_with_pred {
         new_edges.insert((pred, node));
     }
 
+    #[cfg(feature = "trace")]
     {
         log::trace!("   Dependency chains");
         for dep in dependency_chains.iter() {
@@ -1001,30 +700,40 @@ where
         }
     }
 
+    #[cfg(feature = "trace")]
     log::trace!(
         "   New edges for predecessor {}: {:?}",
         graph.node_weight(pred).unwrap(),
         edges_indices_to_gate_ids(new_edges.iter(), graph)
     );
 
-    for dep in dependency_chains {
+    let mut visited_dep_chains = HashSet::new();
+
+    // timed!(
+    // "        [Making connections] part 2",
+    for dep in dependency_chains_with_identity {
+        #[cfg(feature = "trace")]
         log::trace!("   Processing Dependency chain: {:?}", &dep);
+
         for incoming_pred in graph.neighbors_directed(pred, Direction::Incoming) {
+            #[cfg(feature = "trace")]
             log::trace!(
                 "       Predecessor's predecessor: {:?}",
                 graph.node_weight(incoming_pred).unwrap()
             );
 
             let mut tmp = HashSet::new();
-            adjust_collision_with_dependency_chain::<MAX_K, true, _>(
+            adjust_collision_with_dependency_chain_with_prune::<MAX_K, _>(
                 incoming_pred,
-                &dep,
+                dep.as_ref(),
                 graph,
                 gate_map,
                 &mut tmp,
                 0,
-                &mut HashSet::new(),
+                &mut visited_dep_chains,
             );
+
+            #[cfg(feature = "trace")]
             log::trace!(
                 "       New edges for predecessor's predecessor {}: {:?}",
                 graph.node_weight(incoming_pred).unwrap(),
@@ -1034,7 +743,11 @@ where
             new_edges.extend(tmp);
         }
     }
+    // );
+
+    #[cfg(feature = "trace")]
     log::trace!("@@@@ @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ @@@@@",);
+
     new_edges
 }
 /// Local mixing step
@@ -1071,23 +784,13 @@ where
 {
     assert!(ell_out <= ell_in);
 
-    let convex_subset =
+    let convex_subset = timed!(
+        "Find convex subset C^out",
         match find_convex_subcircuit(&skeleton_graph, ell_out, max_convex_iterations, rng) {
             Some(convex_subset) => convex_subset,
             None => return false,
-        };
-
-    {
-        let convex_node_indices = top_sorted_nodes
-            .iter()
-            .filter(|v| convex_subset.contains(v))
-            .map(|node_index| *node_index)
-            .collect_vec();
-        assert!(skeleton_graph
-            .neighbors_directed(convex_node_indices[0], Direction::Outgoing)
-            .collect_vec()
-            .contains(&convex_node_indices[1]));
-    }
+        }
+    );
 
     // Convex subset sorted in topological order
     let convex_subgraph_top_sorted_gate_ids = top_sorted_nodes
@@ -1133,34 +836,35 @@ where
             let mut new_controls = [D::zero(); MAX_K];
             new_controls[0] = *old_to_new_map.get(&old_controls[0]).unwrap();
             new_controls[1] = *old_to_new_map.get(&old_controls[1]).unwrap();
-            BaseGate {
-                id: index,
-                target: *old_to_new_map.get(&gate.target()).unwrap(),
-                control_func: gate.control_func.clone(),
-                controls: new_controls,
-            }
+            BaseGate::new(
+                index,
+                *old_to_new_map.get(&gate.target()).unwrap(),
+                new_controls,
+                gate.control_func().clone(),
+            )
         })
         .collect_vec();
-
     let c_out = Circuit::new(c_out_gates, omega_out.len());
 
-    let c_in_dash = match find_replacement_circuit::<MAX_K, true, D, _>(
-        &c_out,
-        ell_in,
-        D::try_from(c_out.n).unwrap(),
-        two_prob,
-        max_replacement_iterations,
-        rng,
-    ) {
-        Some(c_in_dash) => c_in_dash,
-        None => return false,
-    };
+    let c_in_dash = timed!(
+        "Find replacement circuit C^in",
+        match find_replacement_circuit::<MAX_K, true, D, _>(
+            &c_out,
+            ell_in,
+            D::try_from(c_out.n()).unwrap(),
+            two_prob,
+            max_replacement_iterations,
+            rng,
+        ) {
+            Some(c_in_dash) => c_in_dash,
+            None => return false,
+        }
+    );
 
     let collision_sets_c_in = circuit_to_collision_sets(&c_in_dash);
-
     let c_in = Circuit::new(
         c_in_dash
-            .gates
+            .gates()
             .iter()
             .map(|g| {
                 *latest_id += 1;
@@ -1170,12 +874,12 @@ where
                 let mut old_controls = [D::zero(); MAX_K];
                 old_controls[0] = *new_to_old_map.get(&new_controls[0]).unwrap();
                 old_controls[1] = *new_to_old_map.get(&new_controls[1]).unwrap();
-                BaseGate::<MAX_K, _> {
-                    id: *latest_id,
-                    target: *new_to_old_map.get(&g.target()).unwrap(),
-                    controls: old_controls,
-                    control_func: g.control_func.clone(),
-                }
+                BaseGate::<MAX_K, _>::new(
+                    *latest_id,
+                    *new_to_old_map.get(&g.target()).unwrap(),
+                    old_controls,
+                    g.control_func().clone(),
+                )
             })
             .collect(),
         n.into(),
@@ -1211,11 +915,14 @@ where
     }
 
     // find outsiders and add outgoing edges to gates it collides within C^in
-    let outsiders = outsiders(
-        &skeleton_graph,
-        &c_out_imm_predecessors,
-        &c_out_imm_successors,
-        &convex_subset,
+    let outsiders = timed!(
+        "Find outsiders",
+        find_outsiders(
+            &skeleton_graph,
+            &c_out_imm_predecessors,
+            &c_out_imm_successors,
+            &convex_subset,
+        )
     );
 
     #[cfg(feature = "trace")]
@@ -1237,33 +944,36 @@ where
         log::trace!("@@@@@ Outsiders @@@@@");
         log::trace!(
             "{:?}",
-            node_indices_to_gate_ids(outsiders.iter(), &skeleton_graph)
+            node_indices_to_gate_ids(find_outsiders.iter(), &skeleton_graph)
         );
         log::trace!("@@@@@ @@@@@@@@@ @@@@@");
     }
 
     // find immediate predecessor and successor connection set
-    let mut imm_pred_to_imm_succs_connection = HashMap::new();
-    for imm_pred in c_out_imm_predecessors.iter() {
-        // find all immediate successors imm_pred is connected with via c^out
-        let cout_nodes = skeleton_graph
-            .neighbors_directed(*imm_pred, Direction::Outgoing)
-            .filter(|target_node| convex_subset.contains(target_node));
+    let mut imm_pred_to_imm_succs_connection_via_cout = HashMap::new();
+    timed!(
+        "Immediate predecessors to immediate successors connections via C^out",
+        for imm_pred in c_out_imm_predecessors.iter() {
+            // find all immediate successors imm_pred is connected with via c^out
+            let cout_nodes = skeleton_graph
+                .neighbors_directed(*imm_pred, Direction::Outgoing)
+                .filter(|target_node| convex_subset.contains(target_node));
 
-        let mut targets_reached = HashSet::new();
-        let mut visited = HashSet::new();
-        for node in cout_nodes {
-            dfs_within_convex_set(
-                node,
-                &convex_subset,
-                &skeleton_graph,
-                &mut targets_reached,
-                &mut visited,
-            );
+            let mut targets_reached = HashSet::new();
+            let mut visited = HashSet::new();
+            for node in cout_nodes {
+                dfs_within_convex_set(
+                    node,
+                    &convex_subset,
+                    &skeleton_graph,
+                    &mut targets_reached,
+                    &mut visited,
+                );
+            }
+
+            imm_pred_to_imm_succs_connection_via_cout.insert(*imm_pred, targets_reached);
         }
-
-        imm_pred_to_imm_succs_connection.insert(*imm_pred, targets_reached);
-    }
+    );
 
     #[cfg(feature = "trace")]
     {
@@ -1274,7 +984,7 @@ where
     }
 
     let c_in_nodes = c_in
-        .gates
+        .gates()
         .iter()
         .map(|g| {
             let node = skeleton_graph.add_node(g.id());
@@ -1317,61 +1027,67 @@ where
     // come later in computation than predecessors of A. This means if any imm pedecessor A collides with
     // i^th gate of k^th dependency chain, then predecessors of A must be checked for collisions for j \in [0, i).
     let mut new_edges = HashSet::new();
-    for imm_pred in c_out_imm_predecessors.iter() {
-        #[cfg(feature = "trace")]
-        log::trace!("@@@@@ Checking immediate pred {:?} @@@@@", imm_pred);
-
-        for dep_chain in dependency_chains.iter() {
+    timed!(
+        "Adjust C^in's dependency chains for predecessors",
+        for imm_pred in c_out_imm_predecessors.iter() {
             #[cfg(feature = "trace")]
-            log::trace!("  Dependency chain {:?}", dep_chain);
+            log::trace!("@@@@@ Checking immediate pred {:?} @@@@@", imm_pred);
 
-            let mut this_set = HashSet::new();
-            adjust_collision_with_dependency_chain::<MAX_K, true, _>(
-                *imm_pred,
-                dep_chain,
-                &skeleton_graph,
-                gate_map,
-                &mut this_set,
-                0,
-                &mut HashSet::new(),
-            );
+            for dep_chain in dependency_chains.iter() {
+                #[cfg(feature = "trace")]
+                log::trace!("  Dependency chain {:?}", dep_chain);
 
+                let mut this_set = HashSet::new();
+                adjust_collision_with_dependency_chain::<MAX_K, true, _>(
+                    *imm_pred,
+                    dep_chain,
+                    &skeleton_graph,
+                    gate_map,
+                    &mut this_set,
+                    0,
+                    &mut HashSet::new(),
+                );
+
+                #[cfg(feature = "trace")]
+                log::trace!("  Edges added: {:?}", this_set);
+
+                new_edges.extend(this_set.iter());
+            }
             #[cfg(feature = "trace")]
-            log::trace!("  Edges added: {:?}", this_set);
-
-            new_edges.extend(this_set.iter());
+            log::trace!("@@@@@ @@@@@@@@@@@@@@@@@@@@@@@@@@@ @@@@@");
         }
-        #[cfg(feature = "trace")]
-        log::trace!("@@@@@ @@@@@@@@@@@@@@@@@@@@@@@@@@@ @@@@@");
-    }
+    );
 
-    for imm_succ in c_out_imm_successors.iter() {
-        #[cfg(feature = "trace")]
-        log::trace!("@@@@@ Checking immediate succ {:?} @@@@@", imm_succ);
-
-        for dep_chain in dependency_chains.iter() {
+    timed!(
+        "Adjust C^in's dependency chains for successors",
+        for imm_succ in c_out_imm_successors.iter() {
             #[cfg(feature = "trace")]
-            log::trace!("  Dependency chain {:?}", dep_chain);
+            log::trace!("@@@@@ Checking immediate succ {:?} @@@@@", imm_succ);
 
-            let mut this_set = HashSet::new();
-            adjust_collision_with_dependency_chain::<MAX_K, false, _>(
-                *imm_succ,
-                dep_chain,
-                &skeleton_graph,
-                gate_map,
-                &mut this_set,
-                0,
-                &mut HashSet::new(),
-            );
+            for dep_chain in dependency_chains.iter() {
+                #[cfg(feature = "trace")]
+                log::trace!("  Dependency chain {:?}", dep_chain);
 
+                let mut this_set = HashSet::new();
+                adjust_collision_with_dependency_chain::<MAX_K, false, _>(
+                    *imm_succ,
+                    dep_chain,
+                    &skeleton_graph,
+                    gate_map,
+                    &mut this_set,
+                    0,
+                    &mut HashSet::new(),
+                );
+
+                #[cfg(feature = "trace")]
+                log::trace!("  Edges added: {:?}", this_set);
+
+                new_edges.extend(this_set.iter());
+            }
             #[cfg(feature = "trace")]
-            log::trace!("  Edges added: {:?}", this_set);
-
-            new_edges.extend(this_set.iter());
+            log::trace!("@@@@@ @@@@@@@@@@@@@@@@@@@@@@@@@@@ @@@@@");
         }
-        #[cfg(feature = "trace")]
-        log::trace!("@@@@@ @@@@@@@@@@@@@@@@@@@@@@@@@@@ @@@@@");
-    }
+    );
 
     for out_node in outsiders.iter() {
         let out_gate = gate_map
@@ -1401,7 +1117,7 @@ where
     c_in_nodes.iter().for_each(|n| {
         cin_convex_subset.insert(*n);
     });
-    let mut imm_pred_to_imm_succs_connection_after_cin = HashMap::new();
+    let mut imm_pred_to_imm_succs_connection_via_cin = HashMap::new();
     for imm_pred in c_out_imm_predecessors.iter() {
         // find all immediate successors imm_pred is connected with via c^in
         let cin_nodes = skeleton_graph
@@ -1420,7 +1136,7 @@ where
             );
         }
 
-        imm_pred_to_imm_succs_connection_after_cin.insert(*imm_pred, targets_reached);
+        imm_pred_to_imm_succs_connection_via_cin.insert(*imm_pred, targets_reached);
     }
 
     #[cfg(feature = "trace")]
@@ -1432,9 +1148,9 @@ where
     }
 
     // Find immPred and immSucc pairs that existed via C^out but do not exist via C^in
-    let mut imm_pred_imm_succs_to_create_conn = imm_pred_to_imm_succs_connection;
-    for (imm_pred, imm_succ_set_cout) in imm_pred_imm_succs_to_create_conn.iter_mut() {
-        let imm_succ_set_cin = imm_pred_to_imm_succs_connection_after_cin
+    let mut imm_pred_imm_succs_disconnected = imm_pred_to_imm_succs_connection_via_cout;
+    for (imm_pred, imm_succ_set_cout) in imm_pred_imm_succs_disconnected.iter_mut() {
+        let imm_succ_set_cin = imm_pred_to_imm_succs_connection_via_cin
             .get(imm_pred)
             .unwrap();
         // only retain immediate successors that are no more connected with imm pred via C^in
@@ -1443,7 +1159,7 @@ where
     }
 
     // Create missing conections
-    // #[cfg(feature = "trace")]
+    #[cfg(feature = "trace")]
     {
         log::trace!(
             "Missing connections {:?}",
@@ -1451,38 +1167,60 @@ where
         );
     }
 
+    // for (imm_pred, succs) in imm_pred_imm_succs_to_create_conn.iter() {
+    //     let pred_gate = gate_map
+    //         .get(skeleton_graph.node_weight(*imm_pred).unwrap())
+    //         .unwrap();
+
+    //     for s in succs.iter() {
+    //         let mut path = vec![];
+    //         // Depedency chains to be adjusted with pred's predecessors
+    //         let mut nodes_colliding_with_pred = HashSet::new();
+    //         let mut dependency_chains = vec![];
+
+    //         dfs_till_collision(
+    //             pred_gate,
+    //             s,
+    //             &skeleton_graph,
+    //             &gate_map,
+    //             path,
+    //             colliding_nodes,
+    //             dependency_chains,
+    //             visited,
+    //         );
+    //     }
+    // }
+
+    // let mut disconnected_successors_dependencies = HashMap::new();
+    // let all_disconneted_successors = HashSet::from_iter(
+    //     imm_pred_imm_succs_to_create_conn
+    //         .values()
+    //         .flat_map(|v| v.iter()),
+    // );
+    // for n in all_disconneted_successors {
+    //     // dfs_till_collision(target_gate, curr_node, graph, gate_map, path, colliding_nodes, dependency_chains, visited);
+    // }
+
     let mut new_edges = HashSet::new();
-    for (imm_pred, imm_succ_prev_connnected) in imm_pred_imm_succs_to_create_conn {
-        for imm_succ in imm_succ_prev_connnected {
-            let edges = adjust_dependencies_for_prev_connected_nodes(
-                imm_pred,
-                imm_succ,
-                &skeleton_graph,
-                &gate_map,
-            );
-            new_edges.extend(edges);
+    timed!(
+        "Fix missing connections via C^in",
+        for (imm_pred, imm_succ_prev_connnected) in imm_pred_imm_succs_disconnected {
+            for imm_succ in imm_succ_prev_connnected {
+                let edges = adjust_dependencies_for_prev_connected_nodes(
+                    imm_pred,
+                    imm_succ,
+                    &skeleton_graph,
+                    &gate_map,
+                );
+                new_edges.extend(edges);
+            }
         }
-    }
+    );
 
     // Update the graph with new edges
     for edge in new_edges {
         skeleton_graph.add_edge(edge.0, edge.1, Default::default());
     }
-
-    // #[cfg(feature = "trace")]
-    // {
-    //     log::trace!("@@@@@ New edges @@@@@");
-    //     let mut string = String::from("[");
-    //     for edge in new_edges.iter() {
-    //         string = format!(
-    //             "{string} ({}, {}),",
-    //             skeleton_graph.node_weight(edge.0).unwrap(),
-    //             skeleton_graph.node_weight(edge.1).unwrap()
-    //         );
-    //     }
-    //     log::trace!("{string}]");
-    //     log::trace!("@@@@@ @@@@@@@@@ @@@@@");
-    // }
 
     // Index of removed node is take over by the node that has the last index. Here we remove \ell^out nodes.
     // As long as \ell^out <= \ell^in (notice that C^in gates are added before removing gates of C^out) none of
@@ -1503,8 +1241,8 @@ pub fn test_circuit_equivalance<G, R: RngCore>(
 ) where
     G: Gate<Input = [bool]>,
 {
-    assert_eq!(circuit0.n, circuit1.n);
-    let n = circuit0.n;
+    assert_eq!(circuit0.n(), circuit1.n());
+    let n = circuit0.n();
 
     for value in rng.sample_iter(Uniform::new(0, 1u128 << n - 1)).take(10000) {
         // for value in 0..1u128 << 15 {
@@ -1542,8 +1280,8 @@ pub fn test_circuit_equivalance_for_debug<G, R: RngCore>(
 where
     G: Gate<Input = [bool]>,
 {
-    assert_eq!(circuit0.n, mixed_circuit.n);
-    let n = circuit0.n;
+    assert_eq!(circuit0.n(), mixed_circuit.n());
+    let n = circuit0.n();
 
     for value in rng.sample_iter(Uniform::new(0, 1u128 << n - 1)).take(10000) {
         // for value in 0..1u128 << 15 {
@@ -1581,8 +1319,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    use circuit::{circuit_to_skeleton_graph, sample_circuit_with_base_gate};
     use petgraph::{
-        algo::{all_simple_paths, connected_components, has_path_connecting, toposort},
+        algo::{all_simple_paths, has_path_connecting, toposort},
         dot::{Config, Dot},
     };
     use rand::{thread_rng, SeedableRng};
@@ -1604,7 +1343,7 @@ mod tests {
         let mut top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
         let mut latest_id = 0;
         let mut gate_map = HashMap::new();
-        original_circuit.gates.iter().for_each(|g| {
+        original_circuit.gates().iter().for_each(|g| {
             latest_id = std::cmp::max(latest_id, g.id());
             gate_map.insert(g.id(), g.clone());
         });
@@ -1786,26 +1525,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_weakly_connected() {
-        let n = 5;
-        let gates = 5;
-        let mut rng = thread_rng();
-        for _ in 0..10000 {
-            let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-            let graph = circuit_to_skeleton_graph(&circuit);
-
-            let collisions_sets = circuit_to_collision_sets(&circuit);
-            let is_wc = is_collisions_set_weakly_connected(&collisions_sets);
-            let expected_wc = connected_components(&graph) == 1;
-            assert_eq!(
-                is_wc, expected_wc,
-                "Expected {expected_wc} but got {is_wc} for collisions sets {:?}",
-                collisions_sets
-            );
-        }
-    }
-
-    #[test]
     fn test_dependency_chains_from_collision_set() {
         let mut rng = thread_rng();
         let gates = 5;
@@ -1835,81 +1554,4 @@ mod tests {
 
         dbg!(chains);
     }
-
-    #[test]
-    fn trial() {
-        let mut rng = thread_rng();
-        let gates = 20;
-        let n = 8;
-        let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-        let collisions = circuit_to_collision_sets(&circuit);
-        println!("Collision sets: {:?}", collisions);
-    }
-    // #[test]
-    // fn trial() {
-    //     let n = 5;
-    //     let circuit0 = Circuit::new(
-    //         vec![
-    //             BaseGate::<2, u8> {
-    //                 id: 0,
-    //                 target: 0,
-    //                 controls: [1, 3],
-    //                 control_func: (|controls, inputs| {
-    //                     inputs[controls[0] as usize] & inputs[controls[1] as usize]
-    //                 }),
-    //             },
-    //             BaseGate::<2, u8> {
-    //                 id: 1,
-    //                 target: 3,
-    //                 controls: [2, 4],
-    //                 control_func: (|controls, inputs| {
-    //                     inputs[controls[0] as usize] & inputs[controls[1] as usize]
-    //                 }),
-    //             },
-    //             BaseGate::<2, u8> {
-    //                 id: 2,
-    //                 target: 3,
-    //                 controls: [2, 4],
-    //                 control_func: (|controls, inputs| {
-    //                     inputs[controls[0] as usize] & inputs[controls[1] as usize]
-    //                 }),
-    //             },
-    //         ],
-    //         n,
-    //     );
-    //     let circuit1 = Circuit::new(
-    //         vec![
-    //             BaseGate::<2, u8> {
-    //                 id: 0,
-    //                 target: 0,
-    //                 controls: [1, 3],
-    //                 control_func: (|controls, inputs| {
-    //                     inputs[controls[0] as usize] & inputs[controls[1] as usize]
-    //                 }),
-    //             },
-    //             BaseGate::<2, u8> {
-    //                 id: 1,
-    //                 target: 1,
-    //                 controls: [0, 4],
-    //                 control_func: (|controls, inputs| {
-    //                     inputs[controls[0] as usize] & inputs[controls[1] as usize]
-    //                 }),
-    //             },
-    //             BaseGate::<2, u8> {
-    //                 id: 2,
-    //                 target: 1,
-    //                 controls: [0, 4],
-    //                 control_func: (|controls, inputs| {
-    //                     inputs[controls[0] as usize] & inputs[controls[1] as usize]
-    //                 }),
-    //             },
-    //         ],
-    //         n,
-    //     );
-
-    //     let input_to_bitstring = input_value_to_bitstring_map(5);
-    //     let p0 = permutation_map(&circuit0, &input_to_bitstring);
-    //     let p1 = permutation_map(&circuit1, &input_to_bitstring);
-    //     assert!(p0 == p1);
-    // }
 }
