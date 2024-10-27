@@ -15,7 +15,7 @@ fn main() {
 
     let gates = 200;
     let n = 128;
-    let max_convex_iterations = 1000usize;
+    let max_convex_iterations = 10000usize;
     let max_replacement_iterations = 1000000usize;
 
     let mut rng = ChaCha8Rng::from_entropy();
@@ -30,7 +30,7 @@ fn main() {
     });
 
     // Inflationary stage
-    let inflationary_stage_steps = 1000;
+    let inflationary_stage_steps = 50000;
     let skeleton_graph = run_local_mixing::<true, _>(
         Some(&original_circuit),
         skeleton_graph,
@@ -49,11 +49,22 @@ fn main() {
         "############################# Inflationary stage finished #############################"
     );
 
+    {
+        let top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
+        let mixed_circuit = Circuit::from_top_sorted_nodes(
+            &top_sorted_nodes,
+            &skeleton_graph,
+            &gate_map,
+            original_circuit.n(),
+        );
+        check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, &mut rng);
+    }
+
     log::info!(
         "############################# Kneading stage starting #############################"
     );
 
-    let kneading_stage_steps = 1000;
+    let kneading_stage_steps = 50000;
     let skeleton_graph = run_local_mixing::<true, _>(
         Some(&original_circuit),
         skeleton_graph,
@@ -72,5 +83,14 @@ fn main() {
         "############################# Kneading stage finished #############################"
     );
 
-    // check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, &mut rng);
+    {
+        let top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
+        let mixed_circuit = Circuit::from_top_sorted_nodes(
+            &top_sorted_nodes,
+            &skeleton_graph,
+            &gate_map,
+            original_circuit.n(),
+        );
+        check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, &mut rng);
+    }
 }

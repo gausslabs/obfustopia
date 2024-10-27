@@ -38,7 +38,11 @@ macro_rules! timed {
     ($description:expr, $code:expr) => {{
         #[cfg(feature = "time")]
         let start = {
-            log::info!("{} {} ", $description, "·".repeat(70 - $description.len()));
+            log::info!(
+                "[Time] {} {} ",
+                $description,
+                "·".repeat(70 - $description.len())
+            );
             std::io::Write::flush(&mut std::io::stdout()).unwrap();
             std::time::Instant::now()
         };
@@ -817,34 +821,19 @@ pub fn circuit_to_skeleton_graph<G: Gate>(circuit: &Circuit<G>) -> Graph<usize, 
 /// - Elements in convex subset < \ell^out
 /// - \omega^out <= 3
 /// - Not able to find repalcement circuit after exhausting max_replacement_iterations iterations
-pub fn local_mixing_step<const MAX_K: usize, D, R: Send + Sync + SeedableRng + RngCore>(
+pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     skeleton_graph: &mut Graph<usize, usize>,
     ell_in: usize,
     ell_out: usize,
-    n: D,
+    n: u8,
     two_prob: f64,
-    gate_map: &mut HashMap<usize, BaseGate<MAX_K, D>>,
+    gate_map: &mut HashMap<usize, BaseGate<2, u8>>,
     top_sorted_nodes: &[NodeIndex],
     latest_id: &mut usize,
     max_replacement_iterations: usize,
     max_convex_iterations: usize,
     rng: &mut R,
-) -> bool
-where
-    D: Send
-        + Sync
-        + Into<usize>
-        + TryFrom<usize>
-        + PartialEq
-        + Copy
-        + Eq
-        + Hash
-        + Zero
-        + Display
-        + SampleUniform
-        + Debug,
-    <D as TryFrom<usize>>::Error: Debug,
-{
+) -> bool {
     assert!(ell_out <= ell_in);
 
     let convex_subset = timed!(
@@ -892,15 +881,15 @@ where
     let mut old_to_new_map = HashMap::new();
     let mut new_to_old_map = HashMap::new();
     for (new_index, old_index) in omega_out.iter().enumerate() {
-        old_to_new_map.insert(*old_index, D::try_from(new_index).unwrap());
-        new_to_old_map.insert(D::try_from(new_index).unwrap(), *old_index);
+        old_to_new_map.insert(*old_index, new_index as u8);
+        new_to_old_map.insert(new_index as u8, *old_index);
     }
     let c_out_gates = convex_subgraph_gates
         .clone()
         .enumerate()
         .map(|(index, gate)| {
             let old_controls = gate.controls();
-            let mut new_controls = [D::zero(); MAX_K];
+            let mut new_controls = [0u8; 2];
             new_controls[0] = *old_to_new_map.get(&old_controls[0]).unwrap();
             new_controls[1] = *old_to_new_map.get(&old_controls[1]).unwrap();
             BaseGate::new(
@@ -915,11 +904,10 @@ where
 
     let c_in_dash = timed!(
         "Find replacement circuit",
-        match find_replacement_circuit::<MAX_K, true, D, _>(
+        match find_replacement_circuit_fast(
             &c_out,
             ell_in,
-            D::try_from(c_out.n()).unwrap(),
-            two_prob,
+            c_out.n(),
             max_replacement_iterations,
             rng,
         ) {
@@ -942,10 +930,10 @@ where
 
                 let new_controls = g.controls();
                 // assert!(new_controls[2] == D::try_from(c_in_dash.n).unwrap());
-                let mut old_controls = [D::zero(); MAX_K];
+                let mut old_controls = [0u8; 2];
                 old_controls[0] = *new_to_old_map.get(&new_controls[0]).unwrap();
                 old_controls[1] = *new_to_old_map.get(&new_controls[1]).unwrap();
-                BaseGate::<MAX_K, _>::new(
+                BaseGate::<2, _>::new(
                     *latest_id,
                     *new_to_old_map.get(&g.target()).unwrap(),
                     old_controls,
@@ -1133,7 +1121,7 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
         log::info!("############################## Local mixing step {mixing_steps} ##############################");
 
         let now = std::time::Instant::now();
-        let success = local_mixing_step::<2, _, _>(
+        let success = local_mixing_step::<_>(
             &mut skeleton_graph,
             ell_in,
             ell_out,
@@ -1283,7 +1271,7 @@ mod tests {
                 &node_indices_to_gate_ids(top_sorted_nodes.iter(), &skeleton_graph)
             );
 
-            let success = local_mixing_step::<2, _, _>(
+            let success = local_mixing_step::<_>(
                 &mut skeleton_graph,
                 ell_in,
                 ell_out,
