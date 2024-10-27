@@ -1,5 +1,6 @@
 use petgraph::algo::toposort;
-use rand::{thread_rng, RngCore};
+use rand::{thread_rng, RngCore, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use rust::{
     check_probabilisitic_equivalence,
     circuit::{BaseGate, Circuit, Gate},
@@ -17,7 +18,7 @@ fn main() {
     let max_convex_iterations = 1000usize;
     let max_replacement_iterations = 1000000usize;
 
-    let mut rng = thread_rng();
+    let mut rng = ChaCha8Rng::from_entropy();
 
     let (original_circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
     let skeleton_graph = circuit_to_skeleton_graph(&original_circuit);
@@ -29,9 +30,9 @@ fn main() {
     });
 
     // Inflationary stage
-    let inflationary_stage_steps = 10000;
-    let skeleton_graph = run_local_mixing::<false, _>(
-        &original_circuit,
+    let inflationary_stage_steps = 1000;
+    let skeleton_graph = run_local_mixing::<true, _>(
+        Some(&original_circuit),
         skeleton_graph,
         &mut gate_map,
         &mut latest_id,
@@ -42,6 +43,33 @@ fn main() {
         inflationary_stage_steps,
         max_convex_iterations,
         max_replacement_iterations,
+    );
+
+    log::info!(
+        "############################# Inflationary stage finished #############################"
+    );
+
+    log::info!(
+        "############################# Kneading stage starting #############################"
+    );
+
+    let kneading_stage_steps = 1000;
+    let skeleton_graph = run_local_mixing::<true, _>(
+        Some(&original_circuit),
+        skeleton_graph,
+        &mut gate_map,
+        &mut latest_id,
+        n,
+        &mut rng,
+        4,
+        4,
+        kneading_stage_steps,
+        max_convex_iterations,
+        max_replacement_iterations,
+    );
+
+    log::info!(
+        "############################# Kneading stage finished #############################"
     );
 
     // check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, &mut rng);

@@ -130,69 +130,6 @@ fn dependency_chains_from_collision_set(collision_set: &[HashSet<usize>]) -> Vec
     return chains;
 }
 
-fn adjust_collision_with_dependency_chain<const MAX_K: usize, const IS_PRED: bool, D>(
-    curr_node: NodeIndex,
-    dependency_chain: &[NodeIndex],
-    graph: &Graph<usize, usize>,
-    gate_map: &HashMap<usize, BaseGate<MAX_K, D>>,
-    new_edges: &mut HashSet<(NodeIndex, NodeIndex)>,
-) where
-    D: Copy + PartialEq + Into<usize>,
-{
-    if dependency_chain.len() == 0 {
-        return;
-    }
-
-    let curr_gate = gate_map.get(graph.node_weight(curr_node).unwrap()).unwrap();
-    let mut collding_gate_index = None;
-
-    let dependency_index_iterator = if IS_PRED {
-        Left(0..dependency_chain.len())
-    } else {
-        Right((0..dependency_chain.len()).rev())
-    };
-
-    for index in dependency_index_iterator {
-        let other_gate = gate_map
-            .get(graph.node_weight(dependency_chain[index]).unwrap())
-            .unwrap();
-        if curr_gate.check_collision(other_gate) {
-            collding_gate_index = Some(index);
-            break;
-        }
-    }
-
-    if collding_gate_index.is_some() {
-        let colliding_gate_index = collding_gate_index.unwrap();
-
-        // add collision edge from curr_node to node in dependency chain or node in dep chain to curr_node
-        if IS_PRED {
-            new_edges.insert((curr_node, dependency_chain[colliding_gate_index]));
-        } else {
-            new_edges.insert((dependency_chain[colliding_gate_index], curr_node));
-        }
-
-        let new_dep = if IS_PRED {
-            &dependency_chain[..colliding_gate_index]
-        } else {
-            &dependency_chain[colliding_gate_index + 1..]
-        };
-
-        if new_dep.len() != 0 {
-            let direction = if IS_PRED {
-                Direction::Incoming
-            } else {
-                Direction::Outgoing
-            };
-            for next_node in graph.neighbors_directed(curr_node, direction) {
-                adjust_collision_with_dependency_chain::<MAX_K, IS_PRED, D>(
-                    next_node, new_dep, graph, gate_map, new_edges,
-                );
-            }
-        }
-    }
-}
-
 fn sample_m_unique_values<const M: usize, D, R: RngCore>(
     rng: &mut R,
     distribution: &Uniform<D>,
@@ -451,8 +388,11 @@ where
                 if funtionally_equivalent && WC {
                     let collisions_set = circuit_to_collision_sets(&random_circuit);
                     let is_weakly_connected = is_collisions_set_weakly_connected(&collisions_set);
-                    if funtionally_equivalent && !is_weakly_connected {
-                        log::trace!("[find_replacement_circuit] wft");
+                    #[cfg(feature = "trace")]
+                    {
+                        if funtionally_equivalent && !is_weakly_connected {
+                            log::trace!("[find_replacement_circuit] wft");
+                        }
                     }
                     funtionally_equivalent = is_weakly_connected;
                 }
@@ -734,17 +674,14 @@ fn blah(
     let mut union_visited = HashSet::new();
     let mut path = vec![];
     for source in convex_set.iter() {
-        let dfs_did_not_break = timed!(
-            "dfs2 time",
-            dfs2(
-                *source,
-                &mut union_visited_with_path,
-                &mut union_visited,
-                &mut path,
-                &graph,
-                Direction::Outgoing,
-                desire_set_size,
-            )
+        let dfs_did_not_break = dfs2(
+            *source,
+            &mut union_visited_with_path,
+            &mut union_visited,
+            &mut path,
+            &graph,
+            Direction::Outgoing,
+            desire_set_size,
         );
 
         if !dfs_did_not_break {
@@ -814,140 +751,13 @@ fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
                 }
             }
 
-            #[cfg(feature = "trace")]
+            // #[cfg(feature = "trace")]
             log::trace!("Find convex subcircuit iterations: {curr_iter}");
 
             // println!("find_convex_fast_iter: {curr_iter}, blah: {t:?}");
 
             final_convex_set
         })
-}
-
-fn trialll_par<R: RngCore>(
-    graph: &Graph<usize, usize>,
-    ell_out: usize,
-    max_iterations: usize,
-    rng: &mut R,
-) -> Option<HashSet<NodeIndex>> {
-    let mut curr_iter = 0;
-
-    let mut final_convex_set = None;
-    while curr_iter < max_iterations {
-        let start_node = NodeIndex::from(rng.gen_range(0..graph.node_count()) as u32);
-        let mut convex_set = HashSet::new();
-        convex_set.insert(start_node);
-
-        let moment_of_truth = blah(ell_out, &mut convex_set, graph);
-
-        if moment_of_truth {
-            assert!(convex_set.len() == ell_out);
-            final_convex_set = Some(convex_set);
-            break;
-        } else {
-            curr_iter += 1;
-        }
-    }
-
-    #[cfg(feature = "trace")]
-    log::trace!("Find convex subcircuit iterations: {curr_iter}");
-
-    return final_convex_set;
-}
-
-fn find_convex_subcircuit_slow<R: RngCore>(
-    graph: &Graph<usize, usize>,
-    ell_out: usize,
-    max_iterations: usize,
-    rng: &mut R,
-) -> Option<HashSet<NodeIndex>> {
-    let mut curr_iter = 0;
-
-    let mut final_convex_set = None;
-    while curr_iter < max_iterations {
-        let convex_set = {
-            let start_node = NodeIndex::from(rng.gen_range(0..graph.node_count()) as u32);
-            println!("New source!");
-            let mut explored_candidates = HashSet::new();
-            let mut unexplored_candidates = vec![];
-            // TODO: Why does this always has to outgoing?
-            for outgoing in graph.neighbors_directed(start_node, Outgoing) {
-                unexplored_candidates.push(outgoing);
-            }
-
-            println!("Unexplored candidates: {:?}", &unexplored_candidates);
-
-            let mut convex_set = HashSet::new();
-            convex_set.insert(start_node);
-
-            while convex_set.len() < ell_out {
-                let candidate = unexplored_candidates.pop();
-
-                if candidate.is_none() {
-                    break;
-                }
-
-                let mut union_vertices_visited_with_path = HashSet::new();
-                let mut union_vertices_visited = HashSet::new();
-                let mut path = vec![];
-                union_vertices_visited_with_path.insert(candidate.unwrap());
-                for source in convex_set.iter() {
-                    dfs(
-                        source.clone(),
-                        &mut union_vertices_visited_with_path,
-                        &mut union_vertices_visited,
-                        &mut path,
-                        graph,
-                        Direction::Outgoing,
-                    );
-
-                    if union_vertices_visited_with_path.len() + convex_set.len() > ell_out {}
-                }
-
-                // Remove nodes in the exisiting convex set. The resulting set contains nodes that when added to convex set the set still remains convex.
-                union_vertices_visited_with_path.retain(|node| !convex_set.contains(node));
-
-                if union_vertices_visited_with_path.len() + convex_set.len() == ell_out {
-                    union_vertices_visited_with_path.iter().for_each(|node| {
-                        convex_set.insert(node.clone());
-                    });
-
-                    if convex_set.len() < ell_out {
-                        // more exploration to do
-                        union_vertices_visited_with_path
-                            .into_iter()
-                            .for_each(|node| {
-                                // add more candidates to explore
-                                for outgoing in graph.neighbors_directed(node, Outgoing) {
-                                    if !explored_candidates.contains(&outgoing) {
-                                        unexplored_candidates.push(outgoing);
-                                    }
-                                }
-                            });
-                        explored_candidates.insert(candidate.unwrap());
-                    }
-                } else {
-                    println!(
-                        "IGnored because total length is greater {:?}!",
-                        union_vertices_visited_with_path.len() + convex_set.len()
-                    );
-                    explored_candidates.insert(candidate.unwrap());
-                }
-            }
-            convex_set
-        };
-
-        if convex_set.len() == ell_out {
-            final_convex_set = Some(convex_set);
-            break;
-        } else {
-            curr_iter += 1;
-        }
-    }
-
-    #[cfg(feature = "trace")]
-    log::trace!("Find convex subcircuit iterations: {curr_iter}");
-
-    return final_convex_set;
 }
 
 fn circuit_to_collision_sets<G: Gate>(circuit: &Circuit<G>) -> Vec<HashSet<usize>> {
@@ -1039,9 +849,12 @@ where
 
     let convex_subset = timed!(
         "Find convex subcircuit",
-        match find_convex_subcircuit_slow(&skeleton_graph, ell_out, max_convex_iterations, rng) {
+        match find_convex_fast(&skeleton_graph, ell_out, max_convex_iterations, rng) {
             Some(convex_subset) => convex_subset,
-            None => return false,
+            None => {
+                log::trace!("[returned false] Find convex subscircuit");
+                return false;
+            }
         }
     );
 
@@ -1071,6 +884,7 @@ where
 
     // return false if omega^out <= 3 because finding a replacement is apparently not possilbe.
     if omega_out.len() <= 3 {
+        log::trace!("[returned false] <= active wires");
         return false;
     }
 
@@ -1099,17 +913,23 @@ where
 
     let c_out = Circuit::new(c_out_gates, omega_out.len());
 
-    let c_in_dash = match find_replacement_circuit::<MAX_K, true, D, _>(
-        &c_out,
-        ell_in,
-        D::try_from(c_out.n()).unwrap(),
-        two_prob,
-        max_replacement_iterations,
-        rng,
-    ) {
-        Some(c_in_dash) => c_in_dash,
-        None => return false,
-    };
+    let c_in_dash = timed!(
+        "Find replacement circuit",
+        match find_replacement_circuit::<MAX_K, true, D, _>(
+            &c_out,
+            ell_in,
+            D::try_from(c_out.n()).unwrap(),
+            two_prob,
+            max_replacement_iterations,
+            rng,
+        ) {
+            Some(c_in_dash) => c_in_dash,
+            None => {
+                log::trace!("[returned false] Find replacement circuit");
+                return false;
+            }
+        }
+    );
 
     let collision_sets_c_in = circuit_to_collision_sets(&c_in_dash);
 
@@ -1152,43 +972,48 @@ where
     let mut c_out_imm_successors = HashSet::new();
     // First find all immediate predecessors and successors
     for node in convex_subset.iter() {
-        for pred_edge in skeleton_graph.edges_directed(node.clone(), Direction::Incoming) {
-            if !convex_subset.contains(&pred_edge.source()) {
-                c_out_imm_predecessors.insert(pred_edge.source());
+        for pred in skeleton_graph.neighbors_directed(node.clone(), Direction::Incoming) {
+            if !convex_subset.contains(&pred) {
+                c_out_imm_predecessors.insert(pred);
             }
         }
-        for succ_edge in skeleton_graph.edges_directed(node.clone(), Direction::Outgoing) {
-            if !convex_subset.contains(&succ_edge.target()) {
-                c_out_imm_successors.insert(succ_edge.target());
+        for succ in skeleton_graph.neighbors_directed(node.clone(), Direction::Outgoing) {
+            if !convex_subset.contains(&succ) {
+                c_out_imm_successors.insert(succ);
             }
         }
     }
 
     let mut predecessors = HashSet::new();
     let mut path = vec![];
-    for node in c_out_imm_predecessors.iter() {
-        dfs(
-            *node,
-            &mut HashSet::new(),
-            &mut predecessors,
-            &mut path,
-            &skeleton_graph,
-            Direction::Incoming,
-        );
-    }
+    timed!(
+        "Find all predecessors",
+        for node in c_out_imm_predecessors.iter() {
+            dfs(
+                *node,
+                &mut HashSet::new(),
+                &mut predecessors,
+                &mut path,
+                &skeleton_graph,
+                Direction::Incoming,
+            );
+        }
+    );
     assert!(path.len() == 0);
     let mut successors = HashSet::new();
-    let mut path = vec![];
-    for node in c_out_imm_successors.iter() {
-        dfs(
-            *node,
-            &mut HashSet::new(),
-            &mut successors,
-            &mut path,
-            &skeleton_graph,
-            Direction::Outgoing,
-        );
-    }
+    timed!(
+        "Find all successors",
+        for node in c_out_imm_successors.iter() {
+            dfs(
+                *node,
+                &mut HashSet::new(),
+                &mut successors,
+                &mut path,
+                &skeleton_graph,
+                Direction::Outgoing,
+            );
+        }
+    );
     assert!(path.len() == 0);
 
     let mut outsiders = HashSet::new();
@@ -1284,7 +1109,7 @@ where
 }
 
 pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCore>(
-    original_circuit: &Circuit<BaseGate<2, u8>>,
+    original_circuit: Option<&Circuit<BaseGate<2, u8>>>,
     mut skeleton_graph: Graph<usize, usize>,
     gate_map: &mut HashMap<usize, BaseGate<2, u8>>,
     latest_id: &mut usize,
@@ -1296,6 +1121,10 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
     max_convex_iterations: usize,
     max_replacement_iterations: usize,
 ) -> Graph<usize, usize> {
+    if DEBUG {
+        assert!(original_circuit.is_some());
+    }
+
     let mut mixing_steps = 0;
 
     let mut top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
@@ -1346,6 +1175,7 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
             );
 
             if DEBUG {
+                let original_circuit = original_circuit.unwrap();
                 let mixed_circuit = Circuit::from_top_sorted_nodes(
                     &top_sorted_nodes,
                     &skeleton_graph,
@@ -1373,7 +1203,7 @@ pub fn check_probabilisitic_equivalence<G, R: RngCore>(
     let n = circuit0.n();
 
     for value in rng.sample_iter(Uniform::new(0, 1u128 << n - 1)).take(10000) {
-        // for value in 0..1u128 << 8 {
+        // for value in 0..1u128 << 15 {
         let mut inputs = vec![];
         for i in 0..n {
             inputs.push((value >> i) & 1u128 == 1);
@@ -1571,7 +1401,7 @@ mod tests {
         let n = 64;
         let ell_out = 4;
         let max_iterations = 10000;
-        let mut rng = thread_rng();
+        let mut rng = ChaCha8Rng::from_entropy();
 
         let mut iter = 0;
         while iter < 1000 {
@@ -1579,7 +1409,7 @@ mod tests {
             let skeleton_graph = circuit_to_skeleton_graph(&circuit);
 
             let convex_subgraph =
-                find_convex_subcircuit_slow(&skeleton_graph, ell_out, max_iterations, &mut rng);
+                find_convex_fast(&skeleton_graph, ell_out, max_iterations, &mut rng);
 
             match convex_subgraph {
                 Some(convex_subgraph) => {
@@ -1939,3 +1769,99 @@ mod tests {
         }
     }
 }
+
+// fn find_convex_subcircuit_slow<R: RngCore>(
+//     graph: &Graph<usize, usize>,
+//     ell_out: usize,
+//     max_iterations: usize,
+//     rng: &mut R,
+// ) -> Option<HashSet<NodeIndex>> {
+//     let mut curr_iter = 0;
+
+//     let mut final_convex_set = None;
+//     while curr_iter < max_iterations {
+//         let convex_set = {
+//             let start_node = NodeIndex::from(rng.gen_range(0..graph.node_count()) as u32);
+//             println!("New source!");
+//             let mut explored_candidates = HashSet::new();
+//             let mut unexplored_candidates = vec![];
+//             // TODO: Why does this always has to outgoing?
+//             for outgoing in graph.neighbors_directed(start_node, Outgoing) {
+//                 unexplored_candidates.push(outgoing);
+//             }
+
+//             println!("Unexplored candidates: {:?}", &unexplored_candidates);
+
+//             let mut convex_set = HashSet::new();
+//             convex_set.insert(start_node);
+
+//             while convex_set.len() < ell_out {
+//                 let candidate = unexplored_candidates.pop();
+
+//                 if candidate.is_none() {
+//                     break;
+//                 }
+
+//                 let mut union_vertices_visited_with_path = HashSet::new();
+//                 let mut union_vertices_visited = HashSet::new();
+//                 let mut path = vec![];
+//                 union_vertices_visited_with_path.insert(candidate.unwrap());
+//                 for source in convex_set.iter() {
+//                     dfs(
+//                         source.clone(),
+//                         &mut union_vertices_visited_with_path,
+//                         &mut union_vertices_visited,
+//                         &mut path,
+//                         graph,
+//                         Direction::Outgoing,
+//                     );
+
+//                     if union_vertices_visited_with_path.len() + convex_set.len() > ell_out {}
+//                 }
+
+//                 // Remove nodes in the exisiting convex set. The resulting set contains nodes that when added to convex set the set still remains convex.
+//                 union_vertices_visited_with_path.retain(|node| !convex_set.contains(node));
+
+//                 if union_vertices_visited_with_path.len() + convex_set.len() == ell_out {
+//                     union_vertices_visited_with_path.iter().for_each(|node| {
+//                         convex_set.insert(node.clone());
+//                     });
+
+//                     if convex_set.len() < ell_out {
+//                         // more exploration to do
+//                         union_vertices_visited_with_path
+//                             .into_iter()
+//                             .for_each(|node| {
+//                                 // add more candidates to explore
+//                                 for outgoing in graph.neighbors_directed(node, Outgoing) {
+//                                     if !explored_candidates.contains(&outgoing) {
+//                                         unexplored_candidates.push(outgoing);
+//                                     }
+//                                 }
+//                             });
+//                         explored_candidates.insert(candidate.unwrap());
+//                     }
+//                 } else {
+//                     println!(
+//                         "IGnored because total length is greater {:?}!",
+//                         union_vertices_visited_with_path.len() + convex_set.len()
+//                     );
+//                     explored_candidates.insert(candidate.unwrap());
+//                 }
+//             }
+//             convex_set
+//         };
+
+//         if convex_set.len() == ell_out {
+//             final_convex_set = Some(convex_set);
+//             break;
+//         } else {
+//             curr_iter += 1;
+//         }
+//     }
+
+//     #[cfg(feature = "trace")]
+//     log::trace!("Find convex subcircuit iterations: {curr_iter}");
+
+//     return final_convex_set;
+// }
