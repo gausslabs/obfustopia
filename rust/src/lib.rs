@@ -14,13 +14,21 @@ use rand::{
     distributions::{uniform::SampleUniform, Uniform},
     Rng, RngCore,
 };
-use rayon::iter::{ParallelBridge, ParallelIterator};
+use rayon::{
+    current_num_threads,
+    iter::{
+        IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelBridge,
+        ParallelIterator,
+    },
+    slice::ParallelSlice,
+};
 use rustc_hash::FxHasher;
 
 use std::{
     collections::{HashMap, HashSet},
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
+    thread::current,
 };
 
 pub mod circuit;
@@ -653,7 +661,7 @@ fn adjust_dependencies_for_prev_connected_nodes<const MAX_K: usize, D>(
     gate_map: &HashMap<usize, BaseGate<MAX_K, D>>,
 ) -> HashSet<(NodeIndex, NodeIndex)>
 where
-    D: Copy + PartialEq + Into<usize>,
+    D: Copy + PartialEq + Into<usize> + Sync,
 {
     #[cfg(feature = "trace")]
     log::trace!(
@@ -682,10 +690,11 @@ where
     );
     // );
 
-    let dependency_chains_with_identity = dependency_chains
-        .into_iter()
+    let mut dependency_chains_with_identity = Vec::with_capacity(dependency_chains.len());
+    dependency_chains
+        .into_par_iter()
         .map(|dep| PathWithIdentity::new(dep))
-        .collect_vec();
+        .collect_into_vec(&mut dependency_chains_with_identity);
 
     let mut new_edges = HashSet::new();
     for node in nodes_colliding_with_pred {
@@ -707,42 +716,74 @@ where
         edges_indices_to_gate_ids(new_edges.iter(), graph)
     );
 
-    let mut visited_dep_chains = HashSet::new();
-
     // timed!(
     // "        [Making connections] part 2",
-    for dep in dependency_chains_with_identity {
-        #[cfg(feature = "trace")]
-        log::trace!("   Processing Dependency chain: {:?}", &dep);
-
-        for incoming_pred in graph.neighbors_directed(pred, Direction::Incoming) {
-            #[cfg(feature = "trace")]
-            log::trace!(
-                "       Predecessor's predecessor: {:?}",
-                graph.node_weight(incoming_pred).unwrap()
-            );
-
-            let mut tmp = HashSet::new();
-            adjust_collision_with_dependency_chain_with_prune::<MAX_K, _>(
-                incoming_pred,
-                dep.as_ref(),
-                graph,
-                gate_map,
-                &mut tmp,
-                0,
-                &mut visited_dep_chains,
-            );
-
-            #[cfg(feature = "trace")]
-            log::trace!(
-                "       New edges for predecessor's predecessor {}: {:?}",
-                graph.node_weight(incoming_pred).unwrap(),
-                edges_indices_to_gate_ids(tmp.iter(), graph)
-            );
-
-            new_edges.extend(tmp);
-        }
+    let mut chunk_size = dependency_chains_with_identity.len() / current_num_threads();
+    if chunk_size == 0 {
+        chunk_size += 1;
     }
+
+    let all_new_edges: Vec<HashSet<(NodeIndex, NodeIndex)>> = dependency_chains_with_identity
+        .par_chunks(chunk_size)
+        .map(|dep_chains| {
+            let mut visited_dep_chains = HashSet::new();
+
+            let mut new_edges = HashSet::new();
+
+            for dep in dep_chains {
+                for incoming_pred in graph.neighbors_directed(pred, Direction::Incoming) {
+                    adjust_collision_with_dependency_chain_with_prune::<MAX_K, _>(
+                        incoming_pred,
+                        dep.as_ref(),
+                        graph,
+                        gate_map,
+                        &mut new_edges,
+                        0,
+                        &mut visited_dep_chains,
+                    );
+                }
+            }
+
+            new_edges
+        })
+        .collect();
+
+    for e in all_new_edges {
+        new_edges.extend(e);
+    }
+
+    // for dep in dependency_chains_with_identity {
+    //     #[cfg(feature = "trace")]
+    //     log::trace!("   Processing Dependency chain: {:?}", &dep);
+
+    //     for incoming_pred in graph.neighbors_directed(pred, Direction::Incoming) {
+    //         #[cfg(feature = "trace")]
+    //         log::trace!(
+    //             "       Predecessor's predecessor: {:?}",
+    //             graph.node_weight(incoming_pred).unwrap()
+    //         );
+
+    //         let mut tmp = HashSet::new();
+    //         adjust_collision_with_dependency_chain_with_prune::<MAX_K, _>(
+    //             incoming_pred,
+    //             dep.as_ref(),
+    //             graph,
+    //             gate_map,
+    //             &mut tmp,
+    //             0,
+    //             &mut visited_dep_chains,
+    //         );
+
+    //         #[cfg(feature = "trace")]
+    //         log::trace!(
+    //             "       New edges for predecessor's predecessor {}: {:?}",
+    //             graph.node_weight(incoming_pred).unwrap(),
+    //             edges_indices_to_gate_ids(tmp.iter(), graph)
+    //         );
+
+    //         new_edges.extend(tmp);
+    //     }
+    // }
     // );
 
     #[cfg(feature = "trace")]
@@ -779,7 +820,8 @@ where
         + Zero
         + Display
         + SampleUniform
-        + Debug,
+        + Debug
+        + Sync,
     <D as TryFrom<usize>>::Error: Debug,
 {
     assert!(ell_out <= ell_in);
@@ -1107,10 +1149,14 @@ where
         }
     }
 
+    log::trace!("       New edges count: {}", new_edges.len());
+
     // Update the graph with new edges
     for edge in new_edges {
         skeleton_graph.add_edge(edge.0, edge.1, Default::default());
     }
+
+    // -----
 
     // Find immPred to immSucc connectino with C^in
     let mut cin_convex_subset = HashSet::new();
@@ -1153,8 +1199,24 @@ where
         let imm_succ_set_cin = imm_pred_to_imm_succs_connection_via_cin
             .get(imm_pred)
             .unwrap();
+
+        let had_len = imm_succ_set_cout.len();
+
         // only retain immediate successors that are no more connected with imm pred via C^in
         imm_succ_set_cout.retain(|n| !imm_succ_set_cin.contains(n));
+
+        {
+            if !imm_succ_set_cout.is_empty() {
+                log::trace!(
+                    "Immediate Predecessor {} was conn with {} many via C^out, is conn with {} many via C^in. {} missing connections",
+                    skeleton_graph.node_weight(*imm_pred).unwrap(),
+                    had_len,
+                    imm_succ_set_cin.len(),
+                    imm_succ_set_cout.len()
+                );
+            }
+        }
+
         // assert!(imm_succ_set_cout.is_empty());
     }
 
@@ -1201,21 +1263,50 @@ where
     //     // dfs_till_collision(target_gate, curr_node, graph, gate_map, path, colliding_nodes, dependency_chains, visited);
     // }
 
-    let mut new_edges = HashSet::new();
-    timed!(
+    let edges_to_add: Vec<HashSet<(NodeIndex, NodeIndex)>> = timed!(
         "Fix missing connections via C^in",
-        for (imm_pred, imm_succ_prev_connnected) in imm_pred_imm_succs_disconnected {
-            for imm_succ in imm_succ_prev_connnected {
-                let edges = adjust_dependencies_for_prev_connected_nodes(
-                    imm_pred,
-                    imm_succ,
-                    &skeleton_graph,
-                    &gate_map,
-                );
-                new_edges.extend(edges);
-            }
-        }
+        imm_pred_imm_succs_disconnected
+            .par_iter()
+            .map(|(imm_pred, imm_succ_prev_connnected)| {
+                let mut tmp = HashSet::new();
+                for imm_succ in imm_succ_prev_connnected {
+                    let edges = adjust_dependencies_for_prev_connected_nodes(
+                        *imm_pred,
+                        *imm_succ,
+                        &skeleton_graph,
+                        &gate_map,
+                    );
+                    tmp.extend(edges);
+                }
+                tmp
+            })
+            .collect()
     );
+
+    let mut new_edges = HashSet::new();
+
+    for e in edges_to_add {
+        new_edges.extend(e);
+    }
+    log::trace!(
+        "       New edges count for missing links: {}",
+        new_edges.len()
+    );
+
+    // timed!(
+    //     "Fix missing connections via C^in",
+    //     for (imm_pred, imm_succ_prev_connnected) in imm_pred_imm_succs_disconnected {
+    //         for imm_succ in imm_succ_prev_connnected {
+    //             let edges = adjust_dependencies_for_prev_connected_nodes(
+    //                 imm_pred,
+    //                 imm_succ,
+    //                 &skeleton_graph,
+    //                 &gate_map,
+    //             );
+    //             new_edges.extend(edges);
+    //         }
+    //     }
+    // );
 
     // Update the graph with new edges
     for edge in new_edges {
