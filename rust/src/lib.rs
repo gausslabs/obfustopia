@@ -27,7 +27,10 @@ use std::{
     fmt::{Debug, Display},
     hash::Hash,
     iter::{self, repeat_with},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering::Relaxed},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -717,35 +720,58 @@ fn blah(
 }
 
 fn graph_level(graph: &Graph<usize, usize>) -> HashMap<NodeIndex, usize> {
-    let mut level = HashMap::new();
-    let mut stack = graph
-        .node_identifiers()
-        .filter(|&n| {
-            graph
-                .neighbors_directed(n, Direction::Incoming)
-                .next()
-                .is_none()
-        })
-        .map(|n| (n, 0))
-        .collect::<Vec<_>>();
-    while let Some((n, curr_level)) = stack.pop() {
-        if level.contains_key(&n) {
-            continue;
-        }
-        level.insert(n, curr_level);
-        'outer: for succ in graph.neighbors_directed(n, Direction::Outgoing) {
-            let mut max_level = 0;
-            for pred in graph.neighbors_directed(succ, Direction::Incoming) {
-                match level.get(&pred) {
-                    Some(pred_level) => max_level = max_level.max(*pred_level),
-                    None => continue 'outer,
-                }
+    let stack = Arc::new(Mutex::new(Vec::new()));
+    let degree = (0..graph.node_count() as _)
+        .into_par_iter()
+        .map(|n| {
+            let n = NodeIndex::from(n);
+            let n_degree = graph.neighbors_directed(n, Direction::Incoming).count();
+            if n_degree == 0 {
+                stack.lock().unwrap().push(n);
             }
-            stack.push((succ, max_level + 1));
-        }
-    }
+            (AtomicUsize::new(n_degree), AtomicUsize::new(0))
+        })
+        .collect::<Vec<_>>();
+    let level = (0..current_num_threads())
+        .into_par_iter()
+        .map(|_| {
+            let mut level = HashMap::new();
+            let mut next = None;
+            loop {
+                let Some(curr) = next.take().or_else(|| stack.lock().unwrap().pop()) else {
+                    break;
+                };
+                let curr_level = degree[curr.index()].1.load(Relaxed);
+                level.insert(curr, curr_level);
+                let mut succs = graph
+                    .neighbors_directed(curr, Direction::Outgoing)
+                    .flat_map(|succ| {
+                        let (succ_degree, succ_level) = &degree[succ.index()];
+                        let succ_degree = succ_degree.fetch_sub(1, Relaxed);
+                        succ_level
+                            .fetch_update(Relaxed, Relaxed, |succ_level| {
+                                Some(succ_level.max(curr_level + 1))
+                            })
+                            .unwrap();
+                        (succ_degree == 1).then_some(succ)
+                    })
+                    .collect_vec();
+                next = succs.pop();
+                stack.lock().unwrap().extend(succs);
+            }
+            level
+        })
+        .reduce(HashMap::new, |mut acc, level| {
+            acc.extend(level);
+            acc
+        });
     debug_assert_eq!(level.len(), graph.node_count());
     level
+}
+
+#[test]
+fn time_graph_level() {
+    //
 }
 
 fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
