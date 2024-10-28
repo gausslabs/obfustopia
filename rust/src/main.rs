@@ -32,6 +32,7 @@ fn main() {
     // Inflationary stage
     let inflationary_stage_steps = 50000;
     let skeleton_graph = run_local_mixing::<true, _>(
+        "Inflationary stage",
         Some(&original_circuit),
         skeleton_graph,
         &mut gate_map,
@@ -66,6 +67,7 @@ fn main() {
 
     let kneading_stage_steps = 50000;
     let skeleton_graph = run_local_mixing::<true, _>(
+        "Kneading stage",
         Some(&original_circuit),
         skeleton_graph,
         &mut gate_map,

@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     array::from_fn,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fmt::{Debug, Display},
     hash::Hash,
     iter::{self, repeat_with},
@@ -714,7 +714,7 @@ fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
     ell_out: usize,
     max_iterations: usize,
     rng: &mut R,
-) -> Option<HashSet<NodeIndex>> {
+) -> Option<(NodeIndex, HashSet<NodeIndex>)> {
     let max_iterations = max_iterations / current_num_threads();
 
     let mut nodes = (0..graph.node_count()).collect_vec();
@@ -726,7 +726,7 @@ fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
         .find_map_any(|_| {
             let mut t = Duration::default();
             let mut curr_iter = 0;
-            let mut final_convex_set = None;
+            let mut return_set = None;
             while curr_iter < max_iterations {
                 let start_node = {
                     match nodes.lock().unwrap().pop() {
@@ -747,7 +747,7 @@ fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
 
                 if moment_of_truth {
                     assert!(convex_set.len() == ell_out);
-                    final_convex_set = Some(convex_set);
+                    return_set = Some((start_node, convex_set));
                     nodes.lock().unwrap().clear();
                     break;
                 } else {
@@ -755,12 +755,12 @@ fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
                 }
             }
 
-            // #[cfg(feature = "trace")]
+            #[cfg(feature = "trace")]
             log::trace!("Find convex subcircuit iterations: {curr_iter}");
 
             // println!("find_convex_fast_iter: {curr_iter}, blah: {t:?}");
 
-            final_convex_set
+            return_set
         })
 }
 
@@ -792,6 +792,28 @@ fn circuit_to_collision_sets<G: Gate>(circuit: &Circuit<G>) -> Vec<HashSet<usize
     // }
 
     return all_collision_sets;
+}
+
+pub fn dfs_within_convex_set(
+    curr_node: NodeIndex,
+    convex_set: &HashSet<NodeIndex>,
+    graph: &Graph<usize, usize>,
+    visited: &mut HashSet<NodeIndex>,
+    top_sorted: &mut VecDeque<NodeIndex>,
+) {
+    if visited.contains(&curr_node) {
+        return;
+    }
+
+    for succ in graph
+        .neighbors_directed(curr_node, Direction::Outgoing)
+        .filter(|n| convex_set.contains(n))
+    {
+        dfs_within_convex_set(succ, convex_set, graph, visited, top_sorted);
+    }
+
+    visited.insert(curr_node);
+    top_sorted.push_front(curr_node);
 }
 
 pub fn circuit_to_skeleton_graph<G: Gate>(circuit: &Circuit<G>) -> Graph<usize, usize> {
@@ -828,7 +850,6 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     n: u8,
     two_prob: f64,
     gate_map: &mut HashMap<usize, BaseGate<2, u8>>,
-    top_sorted_nodes: &[NodeIndex],
     latest_id: &mut usize,
     max_replacement_iterations: usize,
     max_convex_iterations: usize,
@@ -836,10 +857,10 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 ) -> bool {
     assert!(ell_out <= ell_in);
 
-    let convex_subset = timed!(
+    let (cout_convex_start_node, cout_convex_subset) = timed!(
         "Find convex subcircuit",
         match find_convex_fast(&skeleton_graph, ell_out, max_convex_iterations, rng) {
-            Some(convex_subset) => convex_subset,
+            Some((convex_start_node, convex_subset)) => (convex_start_node, convex_subset),
             None => {
                 log::trace!("[returned false] Find convex subscircuit");
                 return false;
@@ -847,10 +868,18 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         }
     );
 
+    let mut convex_subset_top_sorted = VecDeque::new();
+    dfs_within_convex_set(
+        cout_convex_start_node,
+        &cout_convex_subset,
+        &skeleton_graph,
+        &mut HashSet::new(),
+        &mut convex_subset_top_sorted,
+    );
+
     // Convex subset sorted in topological order
-    let convex_subgraph_top_sorted_gate_ids = top_sorted_nodes
+    let convex_subgraph_top_sorted_gate_ids = convex_subset_top_sorted
         .iter()
-        .filter(|v| convex_subset.contains(v))
         .map(|node_index| skeleton_graph.node_weight(*node_index).unwrap());
 
     #[cfg(feature = "trace")]
@@ -872,10 +901,10 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     });
 
     // return false if omega^out <= 3 because finding a replacement is apparently not possilbe.
-    if omega_out.len() <= 3 {
-        log::trace!("[returned false] <= active wires");
-        return false;
-    }
+    // if omega_out.len() <= 3 {
+    //     log::trace!("[returned false] <= active wires");
+    //     return false;
+    // }
 
     // Map from old wires to new wires in C^out
     let mut old_to_new_map = HashMap::new();
@@ -959,58 +988,20 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     let mut c_out_imm_predecessors = HashSet::new();
     let mut c_out_imm_successors = HashSet::new();
     // First find all immediate predecessors and successors
-    for node in convex_subset.iter() {
+    for node in cout_convex_subset.iter() {
         for pred in skeleton_graph.neighbors_directed(node.clone(), Direction::Incoming) {
-            if !convex_subset.contains(&pred) {
+            if !cout_convex_subset.contains(&pred) {
                 c_out_imm_predecessors.insert(pred);
             }
         }
         for succ in skeleton_graph.neighbors_directed(node.clone(), Direction::Outgoing) {
-            if !convex_subset.contains(&succ) {
+            if !cout_convex_subset.contains(&succ) {
                 c_out_imm_successors.insert(succ);
             }
         }
     }
 
-    let mut predecessors = HashSet::new();
-    let mut path = vec![];
-    timed!(
-        "Find all predecessors",
-        for node in c_out_imm_predecessors.iter() {
-            dfs(
-                *node,
-                &mut HashSet::new(),
-                &mut predecessors,
-                &mut path,
-                &skeleton_graph,
-                Direction::Incoming,
-            );
-        }
-    );
-    assert!(path.len() == 0);
-    let mut successors = HashSet::new();
-    timed!(
-        "Find all successors",
-        for node in c_out_imm_successors.iter() {
-            dfs(
-                *node,
-                &mut HashSet::new(),
-                &mut successors,
-                &mut path,
-                &skeleton_graph,
-                Direction::Outgoing,
-            );
-        }
-    );
-    assert!(path.len() == 0);
-
-    let mut outsiders = HashSet::new();
-    for node in skeleton_graph.node_indices() {
-        if !(successors.union(&predecessors)).contains(&node) && !convex_subset.contains(&node) {
-            outsiders.insert(node);
-        }
-    }
-
+    // Add C^in nodes to the graph
     let c_in_nodes = c_in
         .gates()
         .iter()
@@ -1034,36 +1025,100 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         node_indices_to_gate_ids(c_in_nodes.iter(), &skeleton_graph)
     );
 
-    for node in predecessors.iter() {
-        let node_gate = gate_map
-            .get(skeleton_graph.node_weight(*node).unwrap())
-            .unwrap();
-        let colliding_indices = c_in.gates().iter().enumerate().filter_map(|(index, gate)| {
-            if node_gate.check_collision(gate) {
-                Some(c_in_nodes[index])
-            } else {
-                None
-            }
-        });
-        colliding_indices.for_each(|target_node| {
-            new_edges.insert((*node, target_node));
-        });
+    let mut predecessors = HashSet::new();
+    let mut successors = HashSet::new();
+
+    let (new_edges_preds, new_edges_succs) = rayon::join(
+        || {
+            // Find all predecessors of C^out and add necessary edges upon collision
+            timed!("Find C^out's predecessors and add necessary edges", {
+                let mut path = vec![];
+                for node in c_out_imm_predecessors.iter() {
+                    dfs(
+                        *node,
+                        &mut HashSet::new(),
+                        &mut predecessors,
+                        &mut path,
+                        &skeleton_graph,
+                        Direction::Incoming,
+                    );
+                }
+
+                let mut new_edges = HashSet::new();
+                for node in predecessors.iter() {
+                    let node_gate = gate_map
+                        .get(skeleton_graph.node_weight(*node).unwrap())
+                        .unwrap();
+                    let colliding_indices =
+                        c_in.gates().iter().enumerate().filter_map(|(index, gate)| {
+                            if node_gate.check_collision(gate) {
+                                Some(c_in_nodes[index])
+                            } else {
+                                None
+                            }
+                        });
+                    colliding_indices.for_each(|target_node| {
+                        new_edges.insert((*node, target_node));
+                    });
+                }
+
+                new_edges
+            })
+        },
+        || {
+            timed!("Find C^out's successors and add necessary edges", {
+                // Find all successors of C^out and add necessary edges
+                let mut path = vec![];
+                for node in c_out_imm_successors.iter() {
+                    dfs(
+                        *node,
+                        &mut HashSet::new(),
+                        &mut successors,
+                        &mut path,
+                        &skeleton_graph,
+                        Direction::Outgoing,
+                    );
+                }
+
+                let mut new_edges = HashSet::new();
+                for node in successors.iter() {
+                    let node_gate = gate_map
+                        .get(skeleton_graph.node_weight(*node).unwrap())
+                        .unwrap();
+                    let colliding_indices =
+                        c_in.gates().iter().enumerate().filter_map(|(index, gate)| {
+                            if node_gate.check_collision(gate) {
+                                Some(c_in_nodes[index])
+                            } else {
+                                None
+                            }
+                        });
+                    colliding_indices.for_each(|source_node| {
+                        new_edges.insert((source_node, *node));
+                    });
+                }
+                new_edges
+            })
+        },
+    );
+    new_edges.extend(new_edges_preds);
+    new_edges.extend(new_edges_succs);
+
+    let mut cin_convex_subset = HashSet::new();
+    c_in_nodes.iter().for_each(|n| {
+        cin_convex_subset.insert(*n);
+    });
+
+    let mut outsiders = HashSet::new();
+    for node in skeleton_graph.node_indices() {
+        if !(successors.union(&predecessors)).contains(&node)
+            && !(cout_convex_subset.union(&cin_convex_subset)).contains(&node)
+        {
+            outsiders.insert(node);
+        }
     }
-    for node in successors.iter() {
-        let node_gate = gate_map
-            .get(skeleton_graph.node_weight(*node).unwrap())
-            .unwrap();
-        let colliding_indices = c_in.gates().iter().enumerate().filter_map(|(index, gate)| {
-            if node_gate.check_collision(gate) {
-                Some(c_in_nodes[index])
-            } else {
-                None
-            }
-        });
-        colliding_indices.for_each(|source_node| {
-            new_edges.insert((source_node, *node));
-        });
-    }
+
+    // Add edges from outsiders to colliding gates in C^in
     for node in outsiders.iter() {
         let node_gate = gate_map
             .get(skeleton_graph.node_weight(*node).unwrap())
@@ -1087,7 +1142,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     // Index of removed node is take over by the node that has the last index. Here we remove \ell^out nodes.
     // As long as \ell^out <= \ell^in (notice that C^in gates are added before removing gates of C^out) none of
     // pre-existing nodes we replace the removed node and hence we wouldn't incorrectly delete some node.
-    for node in convex_subset {
+    for node in cout_convex_subset {
         gate_map
             .remove(&skeleton_graph.remove_node(node).unwrap())
             .unwrap();
@@ -1097,6 +1152,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 }
 
 pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCore>(
+    stage_name: &str,
     original_circuit: Option<&Circuit<BaseGate<2, u8>>>,
     mut skeleton_graph: Graph<usize, usize>,
     gate_map: &mut HashMap<usize, BaseGate<2, u8>>,
@@ -1115,10 +1171,8 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
 
     let mut mixing_steps = 0;
 
-    let mut top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
-
     while mixing_steps < total_mixing_steps {
-        log::info!("############################## Local mixing step {mixing_steps} ##############################");
+        log::info!("############################## {stage_name} mixing step {mixing_steps} ##############################");
 
         let now = std::time::Instant::now();
         let success = local_mixing_step::<_>(
@@ -1128,7 +1182,6 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
             n,
             1.0,
             gate_map,
-            &top_sorted_nodes,
             latest_id,
             max_replacement_iterations,
             max_convex_iterations,
@@ -1142,35 +1195,28 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
         );
 
         if success {
-            let top_sort_res = timed!(
-                "Topological sort after local mixing",
-                toposort(&skeleton_graph, None)
-            );
-            match top_sort_res {
-                Result::Ok(v) => {
-                    top_sorted_nodes = v;
-                }
-                Err(_) => {
-                    log::error!("Cycle detected!");
-                    assert!(false);
-                }
-            }
-
-            #[cfg(feature = "trace")]
-            log::trace!(
-                "Topsorted nodes after step {mixing_steps}: {:?}",
-                node_indices_to_gate_ids(top_sorted_nodes.iter(), &skeleton_graph)
-            );
-
             if DEBUG {
                 let original_circuit = original_circuit.unwrap();
-                let mixed_circuit = Circuit::from_top_sorted_nodes(
-                    &top_sorted_nodes,
-                    &skeleton_graph,
-                    &gate_map,
-                    original_circuit.n(),
+
+                let top_sort_res = timed!(
+                    "Topological sort after local mixing",
+                    toposort(&skeleton_graph, None)
                 );
-                check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, rng);
+                match top_sort_res {
+                    Result::Ok(top_sorted_nodes) => {
+                        let mixed_circuit = Circuit::from_top_sorted_nodes(
+                            &top_sorted_nodes,
+                            &skeleton_graph,
+                            &gate_map,
+                            original_circuit.n(),
+                        );
+                        check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, rng);
+                    }
+                    Err(_) => {
+                        log::error!("Cycle detected!");
+                        assert!(false);
+                    }
+                }
             }
 
             mixing_steps += 1;
@@ -1221,16 +1267,11 @@ pub fn check_probabilisitic_equivalence<G, R: RngCore>(
 #[cfg(test)]
 mod tests {
 
-    use std::iter::Sum;
-    use std::{
-        collections::{hash_map::Entry, BTreeMap},
-        iter::repeat_with,
-        usize,
-    };
+    use std::usize;
 
     use petgraph::{
         algo::{all_simple_paths, connected_components, has_path_connecting, toposort},
-        dot::{Config, Dot},
+        graph::Node,
     };
     use rand::{thread_rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
@@ -1266,6 +1307,7 @@ mod tests {
 
         while mixing_steps < total_mixing_steps {
             log::info!("#### Mixing step {mixing_steps} ####");
+
             log::info!(
                 "Topological order before local mixing iteration: {:?}",
                 &node_indices_to_gate_ids(top_sorted_nodes.iter(), &skeleton_graph)
@@ -1278,7 +1320,6 @@ mod tests {
                 n,
                 1.0,
                 &mut gate_map,
-                &top_sorted_nodes,
                 &mut latest_id,
                 max_replacement_iterations,
                 max_convex_iterations,
@@ -1324,9 +1365,6 @@ mod tests {
                     original_circuit.n(),
                 );
                 check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, &mut rng);
-
-                println!("{original_circuit}");
-                println!("{mixed_circuit}");
 
                 mixing_steps += 1;
             }
@@ -1400,7 +1438,7 @@ mod tests {
                 find_convex_fast(&skeleton_graph, ell_out, max_iterations, &mut rng);
 
             match convex_subgraph {
-                Some(convex_subgraph) => {
+                Some((start_node, convex_subgraph)) => {
                     // check that the subgraph is convex
 
                     let values = convex_subgraph.iter().map(|v| *v).collect_vec();
@@ -1425,6 +1463,67 @@ mod tests {
                                     });
                                 }
                             }
+                        }
+                    }
+
+                    iter += 1;
+                }
+                None => {}
+            }
+        }
+    }
+
+    fn find_all_predecessors(node: NodeIndex, graph: &Graph<usize, usize>) -> HashSet<NodeIndex> {
+        let mut all_preds = HashSet::new();
+        for curr_node in graph.neighbors_directed(node, Direction::Incoming) {
+            dfs(
+                curr_node,
+                &mut HashSet::new(),
+                &mut all_preds,
+                &mut vec![],
+                graph,
+                Direction::Incoming,
+            );
+        }
+        return all_preds;
+    }
+
+    #[test]
+    fn test_topological_order_of_convex_subset() {
+        let gates = 2000;
+        let n = 64;
+        // TODO: Fails for >= 2 because top sort is random
+        let ell_out = 4;
+        let max_iterations = 10000;
+        let mut rng = ChaCha8Rng::from_entropy();
+
+        let mut iter = 0;
+        while iter < 100 {
+            let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
+            let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+
+            let convex_subgraph =
+                find_convex_fast(&skeleton_graph, ell_out, max_iterations, &mut rng);
+
+            match convex_subgraph {
+                Some((start_node, convex_subgraph)) => {
+                    // use DFS within convex set to topologically sort nodes in convex subgraph
+                    let mut convex_set_sorted = VecDeque::new();
+                    dfs_within_convex_set(
+                        start_node,
+                        &convex_subgraph,
+                        &skeleton_graph,
+                        &mut HashSet::new(),
+                        &mut convex_set_sorted,
+                    );
+
+                    // If node j is after node i, then j cannot be predecessor of i
+                    for i in 0..convex_set_sorted.len() {
+                        // find predecessors of i
+                        let all_preds =
+                            find_all_predecessors(convex_set_sorted[i], &skeleton_graph);
+                        for j in i + 1..convex_set_sorted.len() {
+                            assert!(!all_preds.contains(&convex_set_sorted[j]));
                         }
                     }
 
@@ -1622,7 +1721,7 @@ mod tests {
             t += start.elapsed();
             c += 1;
             match a {
-                Some(convex_subset) => {
+                Some((start_node, convex_subset)) => {
                     // Convex subset sorted in topological order
                     let convex_subgraph_top_sorted_gate_ids = top_sorted_nodes
                         .iter()
