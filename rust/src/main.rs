@@ -13,7 +13,7 @@ fn main() {
     log4rs::init_file("log4rs.yaml", Default::default()).unwrap();
     // env_logger::init();
 
-    let gates = 200;
+    let gates = 50000;
     let n = 128;
     let max_convex_iterations = 10000usize;
     let max_replacement_iterations = 1000000usize;

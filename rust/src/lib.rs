@@ -6,7 +6,7 @@ use num_traits::Zero;
 use petgraph::{
     algo::toposort,
     graph::NodeIndex,
-    visit::EdgeRef,
+    visit::{EdgeRef, IntoNodeIdentifiers},
     Direction::{self, Outgoing},
     Graph,
 };
@@ -577,6 +577,8 @@ fn dfs2(
     graph: &Graph<usize, usize>,
     direction: Direction,
     break_when: usize,
+    max_level: usize,
+    level: &HashMap<NodeIndex, usize>,
 ) -> bool {
     if visited_with_path.len() > break_when {
         return false;
@@ -589,7 +591,7 @@ fn dfs2(
         return true;
     }
 
-    if visited.contains(&curr_node) {
+    if visited.contains(&curr_node) || level[&curr_node] >= max_level {
         return true;
     }
 
@@ -605,6 +607,8 @@ fn dfs2(
                 graph,
                 direction,
                 break_when,
+                max_level,
+                level,
             );
 
         if !return_bool {
@@ -621,6 +625,7 @@ fn blah(
     desire_set_size: usize,
     convex_set: &mut HashSet<NodeIndex>,
     graph: &Graph<usize, usize>,
+    level: &HashMap<NodeIndex, usize>,
 ) -> bool {
     if convex_set.len() == desire_set_size {
         return true;
@@ -686,6 +691,8 @@ fn blah(
             &graph,
             Direction::Outgoing,
             desire_set_size,
+            level[&candidate_node],
+            level,
         );
 
         if !dfs_did_not_break {
@@ -700,7 +707,7 @@ fn blah(
             convex_set.insert(node);
         }
         if convex_set.len() < desire_set_size {
-            return blah(desire_set_size, convex_set, graph);
+            return blah(desire_set_size, convex_set, graph, level);
         } else {
             return true;
         }
@@ -709,12 +716,45 @@ fn blah(
     }
 }
 
+fn graph_level(graph: &Graph<usize, usize>) -> HashMap<NodeIndex, usize> {
+    let mut level = HashMap::new();
+    let mut stack = graph
+        .node_identifiers()
+        .filter(|&n| {
+            graph
+                .neighbors_directed(n, Direction::Incoming)
+                .next()
+                .is_none()
+        })
+        .map(|n| (n, 0))
+        .collect::<Vec<_>>();
+    while let Some((n, curr_level)) = stack.pop() {
+        if level.contains_key(&n) {
+            continue;
+        }
+        level.insert(n, curr_level);
+        'outer: for succ in graph.neighbors_directed(n, Direction::Outgoing) {
+            let mut max_level = 0;
+            for pred in graph.neighbors_directed(succ, Direction::Incoming) {
+                match level.get(&pred) {
+                    Some(pred_level) => max_level = max_level.max(*pred_level),
+                    None => continue 'outer,
+                }
+            }
+            stack.push((succ, max_level + 1));
+        }
+    }
+    debug_assert_eq!(level.len(), graph.node_count());
+    level
+}
+
 fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
     graph: &Graph<usize, usize>,
     ell_out: usize,
     max_iterations: usize,
     rng: &mut R,
 ) -> Option<(NodeIndex, HashSet<NodeIndex>)> {
+    let level = graph_level(graph);
     let max_iterations = max_iterations / current_num_threads();
 
     let mut nodes = (0..graph.node_count()).collect_vec();
@@ -742,7 +782,7 @@ fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
                 convex_set.insert(start_node);
 
                 let sttt = std::time::Instant::now();
-                let moment_of_truth = blah(ell_out, &mut convex_set, graph);
+                let moment_of_truth = blah(ell_out, &mut convex_set, graph, &level);
                 t += sttt.elapsed();
 
                 if moment_of_truth {
@@ -1668,22 +1708,23 @@ mod tests {
     #[test]
     fn time_blah() {
         env_logger::init();
-        let gates = 5000;
+        let gates = 50000;
         let n = 64;
         let ell_out = 4;
         let mut rng = thread_rng();
         let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
         let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+        let level = graph_level(&skeleton_graph);
 
         let mut stats = Stats::new();
 
-        for _ in 0..1000 {
+        for _ in 0..10000 {
             let start_node = NodeIndex::from(rng.gen_range(0..skeleton_graph.node_count()) as u32);
             let mut convex_set = HashSet::new();
             convex_set.insert(start_node);
             let now = std::time::Instant::now();
             // let _ = trialll(&skeleton_graph, ell_out, max_iterations, &mut rng).unwrap();
-            let _ = blah(ell_out, &mut convex_set, &skeleton_graph);
+            let _ = blah(ell_out, &mut convex_set, &skeleton_graph, &level);
             stats.add_sample(now.elapsed().as_secs_f64());
         }
 
