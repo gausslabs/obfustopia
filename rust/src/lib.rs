@@ -557,7 +557,7 @@ fn dfs_fast(
         .take(graph.node_count())
         .collect_vec();
     sources.par_iter().for_each(|s| {
-        visited[s.index()].fetch_or(true, Relaxed);
+        visited[s.index()].swap(true, Relaxed);
     });
     let stack = Arc::new(Mutex::new(sources));
 
@@ -566,7 +566,7 @@ fn dfs_fast(
         while let Some(curr) = next.take().or_else(|| stack.lock().unwrap().pop()) {
             let mut succs = graph
                 .neighbors_directed(curr, direction)
-                .flat_map(|succ| (!visited[succ.index()].fetch_or(true, Relaxed)).then_some(succ))
+                .flat_map(|succ| (!visited[succ.index()].swap(true, Relaxed)).then_some(succ))
                 .collect_vec();
             next = succs.pop();
             if !succs.is_empty() {
@@ -1138,82 +1138,62 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         node_indices_to_gate_ids(c_in_nodes.iter(), &skeleton_graph)
     );
 
-    let mut predecessors = HashSet::new();
-    let mut successors = HashSet::new();
-
-    let (new_edges_preds, new_edges_succs) = rayon::join(
-        || {
-            // Find all predecessors of C^out and add necessary edges upon collision
-            timed!("Find C^out's predecessors and add necessary edges", {
-                let mut path = vec![];
-                for node in c_out_imm_predecessors.iter() {
-                    dfs(
-                        *node,
-                        &mut HashSet::new(),
-                        &mut predecessors,
-                        &mut path,
-                        &skeleton_graph,
-                        Direction::Incoming,
-                    );
-                }
-
-                let mut new_edges = HashSet::new();
-                for node in predecessors.iter() {
-                    let node_gate = gate_map
-                        .get(skeleton_graph.node_weight(*node).unwrap())
-                        .unwrap();
-                    let colliding_indices =
-                        c_in.gates().iter().enumerate().filter_map(|(index, gate)| {
-                            if node_gate.check_collision(gate) {
-                                Some(c_in_nodes[index])
-                            } else {
-                                None
-                            }
-                        });
-                    colliding_indices.for_each(|target_node| {
-                        new_edges.insert((*node, target_node));
+    let (predecessors, new_edges_preds) =
+        timed!("Find C^out's predecessors and add necessary edges", {
+            let predecessors = dfs_fast(
+                skeleton_graph,
+                Vec::from_iter(c_out_imm_predecessors.clone()),
+                Direction::Incoming,
+            );
+            let mut new_edges = HashSet::new();
+            for node in predecessors.iter() {
+                let node_gate = gate_map
+                    .get(skeleton_graph.node_weight(*node).unwrap())
+                    .unwrap();
+                let colliding_indices =
+                    c_in.gates().iter().enumerate().filter_map(|(index, gate)| {
+                        if node_gate.check_collision(gate) {
+                            Some(c_in_nodes[index])
+                        } else {
+                            None
+                        }
                     });
-                }
+                colliding_indices.for_each(|target_node| {
+                    new_edges.insert((*node, target_node));
+                });
+            }
 
-                new_edges
-            })
-        },
-        || {
-            timed!("Find C^out's successors and add necessary edges", {
-                // Find all successors of C^out and add necessary edges
-                let mut path = vec![];
-                for node in c_out_imm_successors.iter() {
-                    dfs(
-                        *node,
-                        &mut HashSet::new(),
-                        &mut successors,
-                        &mut path,
-                        &skeleton_graph,
-                        Direction::Outgoing,
-                    );
-                }
+            (predecessors, new_edges)
+        });
+    let (successors, new_edges_succs) =
+        timed!("Find C^out's successors and add necessary edges", {
+            let successors = dfs_fast(
+                skeleton_graph,
+                Vec::from_iter(c_out_imm_successors.clone()),
+                Direction::Outgoing,
+            );
 
-                let mut new_edges = HashSet::new();
-                for node in successors.iter() {
-                    let node_gate = gate_map
-                        .get(skeleton_graph.node_weight(*node).unwrap())
-                        .unwrap();
-                    let colliding_indices =
-                        c_in.gates().iter().enumerate().filter_map(|(index, gate)| {
-                            if node_gate.check_collision(gate) {
-                                Some(c_in_nodes[index])
-                            } else {
-                                None
-                            }
-                        });
-                    colliding_indices.for_each(|source_node| {
-                        new_edges.insert((source_node, *node));
+            let mut new_edges = HashSet::new();
+            for node in successors.iter() {
+                let node_gate = gate_map
+                    .get(skeleton_graph.node_weight(*node).unwrap())
+                    .unwrap();
+                let colliding_indices =
+                    c_in.gates().iter().enumerate().filter_map(|(index, gate)| {
+                        if node_gate.check_collision(gate) {
+                            Some(c_in_nodes[index])
+                        } else {
+                            None
+                        }
                     });
-                }
-                new_edges
-            })
-        },
-    );
+                colliding_indices.for_each(|source_node| {
+                    new_edges.insert((source_node, *node));
+                });
+            }
+
+            (successors, new_edges)
+        });
+
     new_edges.extend(new_edges_preds);
     new_edges.extend(new_edges_succs);
 
@@ -1991,7 +1971,7 @@ mod tests {
     }
 
     #[test]
-    fn time_find_preds() {
+    fn time_dfs_fast() {
         let gates = 50000;
         let n = 128;
 
@@ -2001,95 +1981,39 @@ mod tests {
             sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
         let graph = circuit_to_skeleton_graph(&original_circuit);
 
-        // dbg!(graph.node_count());
-        // dbg!(graph.edge_count());
-
-        let graph = {
-            let mut graph = Graph::new();
-            (0..50000usize).for_each(|_| {
-                graph.add_node(0);
-            });
-            let mut edges = HashSet::new();
-            (0..38750000).for_each(|_| loop {
-                let mut from = rng.gen_range(0..50000u32);
-                let mut to = rng.gen_range(0..50000u32);
-                if from > to {
-                    core::mem::swap(&mut from, &mut to);
-                }
-                if to != from && !edges.contains(&(from, to)) {
-                    edges.insert((from, to));
-                    break;
-                }
-            });
-            graph.extend_with_edges(edges);
-            graph
-        };
-
-        let [sources, sinks] = [Direction::Incoming, Direction::Outgoing].map(|dir| {
-            (0..graph.node_count() as _)
-                .map(NodeIndex::from)
-                .filter(|n| graph.neighbors_directed(*n, dir).count() == 0)
-                .collect_vec()
-        });
-
-        for (starts, dir) in [
-            (&sources, Direction::Outgoing),
-            (&sinks, Direction::Incoming),
-        ] {
-            let n = 3;
+        let n = 30;
+        let mut t = Duration::default();
+        for _ in 0..n {
+            let source = NodeIndex::from(rng.gen_range(0..gates as _));
             let start = std::time::Instant::now();
-            for i in 0..n {
-                let visited = dfs_fast(&graph, starts.clone(), dir);
-                if i == n - 1 {
-                    println!(
-                        "finding {} {} of {} start nodes in 50k graph takes {:?}",
-                        visited.len(),
-                        match dir {
-                            Direction::Outgoing => "succs",
-                            Direction::Incoming => "preds",
-                        },
-                        starts.len(),
-                        start.elapsed() / n
-                    );
-                }
-            }
+            dfs_fast(&graph, vec![source], Direction::Incoming);
+            t += start.elapsed();
         }
+        println!("Find predecessors: {:?}", t / n);
 
-        for (starts, dir) in [
-            (&sources, Direction::Outgoing),
-            (&sinks, Direction::Incoming),
-        ] {
-            let n = 3;
+        let mut t = Duration::default();
+        for _ in 0..n {
+            let source = NodeIndex::from(rng.gen_range(0..gates as _));
             let start = std::time::Instant::now();
-            for i in 0..n {
-                let mut visited = HashSet::new();
-                match dir {
-                    Direction::Outgoing => {
-                        visited.extend(
-                            Dfs::from_parts(starts.to_vec(), graph.visit_map()).iter(&graph),
-                        );
-                    }
-                    Direction::Incoming => {
-                        visited.extend(
-                            Dfs::from_parts(starts.to_vec(), graph.visit_map())
-                                .iter(Reversed(&graph)),
-                        );
-                    }
-                }
+            dfs_fast(&graph, vec![source], Direction::Outgoing);
+            t += start.elapsed();
+        }
+        println!("Find successors: {:?}", t / n);
 
-                if i == n - 1 {
-                    println!(
-                        "finding {} {} of {} start nodes in 50k graph takes {:?}",
-                        visited.len(),
-                        match dir {
-                            Direction::Outgoing => "succs",
-                            Direction::Incoming => "preds",
-                        },
-                        starts.len(),
-                        start.elapsed() / n
-                    );
-                }
-            }
+        for _ in 0..10 {
+            let start = NodeIndex::from(rng.gen_range(0..gates as _));
+            assert_eq!(
+                dfs_fast(&graph, vec![start], Direction::Outgoing),
+                Dfs::from_parts(vec![start], graph.visit_map())
+                    .iter(&graph)
+                    .collect()
+            );
+            assert_eq!(
+                dfs_fast(&graph, vec![start], Direction::Incoming),
+                Dfs::from_parts(vec![start], graph.visit_map())
+                    .iter(Reversed(&graph))
+                    .collect()
+            )
         }
     }
 }
