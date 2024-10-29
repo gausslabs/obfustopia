@@ -17,7 +17,10 @@ use rand::{
 };
 use rayon::{
     current_num_threads,
-    iter::{IndexedParallelIterator, IntoParallelIterator, ParallelBridge, ParallelIterator},
+    iter::{
+        IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelBridge,
+        ParallelIterator,
+    },
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -28,7 +31,7 @@ use std::{
     hash::Hash,
     iter::{self, repeat_with},
     sync::{
-        atomic::{AtomicUsize, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
         Arc, Mutex,
     },
     time::Duration,
@@ -543,6 +546,40 @@ fn find_replacement_circuit_fast<R: Send + Sync + RngCore + SeedableRng>(
                 replacement_circuit
             })
     }
+}
+
+fn dfs_fast(
+    graph: &Graph<usize, usize>,
+    sources: Vec<NodeIndex>,
+    direction: Direction,
+) -> HashSet<NodeIndex> {
+    let visited = repeat_with(|| AtomicBool::new(false))
+        .take(graph.node_count())
+        .collect_vec();
+    sources.par_iter().for_each(|s| {
+        visited[s.index()].fetch_or(true, Relaxed);
+    });
+    let stack = Arc::new(Mutex::new(sources));
+
+    (0..current_num_threads()).into_par_iter().for_each(|_| {
+        let mut next = None;
+        while let Some(curr) = next.take().or_else(|| stack.lock().unwrap().pop()) {
+            let mut succs = graph
+                .neighbors_directed(curr, direction)
+                .flat_map(|succ| (!visited[succ.index()].fetch_or(true, Relaxed)).then_some(succ))
+                .collect_vec();
+            next = succs.pop();
+            if !succs.is_empty() {
+                stack.lock().unwrap().extend(succs);
+            }
+        }
+    });
+
+    visited
+        .into_par_iter()
+        .enumerate()
+        .flat_map(|(i, visited)| visited.into_inner().then(|| NodeIndex::from(i as u32)))
+        .collect()
 }
 
 fn dfs(
@@ -1348,6 +1385,7 @@ mod tests {
     use petgraph::{
         algo::{all_simple_paths, connected_components, has_path_connecting, toposort},
         graph::Node,
+        visit::{Dfs, Reversed, Visitable, Walker},
     };
     use rand::{thread_rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
@@ -1950,5 +1988,108 @@ mod tests {
             graph_level(&graph);
         }
         dbg!(start.elapsed() / n);
+    }
+
+    #[test]
+    fn time_find_preds() {
+        let gates = 50000;
+        let n = 128;
+
+        let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+
+        let (original_circuit, _) =
+            sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
+        let graph = circuit_to_skeleton_graph(&original_circuit);
+
+        // dbg!(graph.node_count());
+        // dbg!(graph.edge_count());
+
+        let graph = {
+            let mut graph = Graph::new();
+            (0..50000usize).for_each(|_| {
+                graph.add_node(0);
+            });
+            let mut edges = HashSet::new();
+            (0..38750000).for_each(|_| loop {
+                let mut from = rng.gen_range(0..50000u32);
+                let mut to = rng.gen_range(0..50000u32);
+                if from > to {
+                    core::mem::swap(&mut from, &mut to);
+                }
+                if to != from && !edges.contains(&(from, to)) {
+                    edges.insert((from, to));
+                    break;
+                }
+            });
+            graph.extend_with_edges(edges);
+            graph
+        };
+
+        let [sources, sinks] = [Direction::Incoming, Direction::Outgoing].map(|dir| {
+            (0..graph.node_count() as _)
+                .map(NodeIndex::from)
+                .filter(|n| graph.neighbors_directed(*n, dir).count() == 0)
+                .collect_vec()
+        });
+
+        for (starts, dir) in [
+            (&sources, Direction::Outgoing),
+            (&sinks, Direction::Incoming),
+        ] {
+            let n = 3;
+            let start = std::time::Instant::now();
+            for i in 0..n {
+                let visited = dfs_fast(&graph, starts.clone(), dir);
+                if i == n - 1 {
+                    println!(
+                        "finding {} {} of {} start nodes in 50k graph takes {:?}",
+                        visited.len(),
+                        match dir {
+                            Direction::Outgoing => "succs",
+                            Direction::Incoming => "preds",
+                        },
+                        starts.len(),
+                        start.elapsed() / n
+                    );
+                }
+            }
+        }
+
+        for (starts, dir) in [
+            (&sources, Direction::Outgoing),
+            (&sinks, Direction::Incoming),
+        ] {
+            let n = 3;
+            let start = std::time::Instant::now();
+            for i in 0..n {
+                let mut visited = HashSet::new();
+                match dir {
+                    Direction::Outgoing => {
+                        visited.extend(
+                            Dfs::from_parts(starts.to_vec(), graph.visit_map()).iter(&graph),
+                        );
+                    }
+                    Direction::Incoming => {
+                        visited.extend(
+                            Dfs::from_parts(starts.to_vec(), graph.visit_map())
+                                .iter(Reversed(&graph)),
+                        );
+                    }
+                }
+
+                if i == n - 1 {
+                    println!(
+                        "finding {} {} of {} start nodes in 50k graph takes {:?}",
+                        visited.len(),
+                        match dir {
+                            Direction::Outgoing => "succs",
+                            Direction::Incoming => "preds",
+                        },
+                        starts.len(),
+                        start.elapsed() / n
+                    );
+                }
+            }
+        }
     }
 }
