@@ -784,6 +784,62 @@ fn graph_level(graph: &Graph<usize, usize>) -> Vec<usize> {
     level
 }
 
+fn find_convex_fast_pruned<R: Send + Sync + RngCore + SeedableRng>(
+    graph: &Graph<usize, usize>,
+    ell_out: usize,
+    max_iterations: usize,
+    rng: &mut R,
+) -> Option<(NodeIndex, HashSet<NodeIndex>)> {
+    let level = graph_level(graph);
+    let max_iterations = max_iterations / current_num_threads();
+
+    let mut nodes = (0..graph.node_count() / 2).collect_vec();
+    nodes.shuffle(rng);
+    let nodes = Arc::new(Mutex::new(nodes));
+
+    (0..current_num_threads())
+        .into_par_iter()
+        .find_map_any(|_| {
+            let mut t = Duration::default();
+            let mut curr_iter = 0;
+            let mut return_set = None;
+            while curr_iter < max_iterations {
+                let start_node = {
+                    match nodes.lock().unwrap().pop() {
+                        Some(idx) => NodeIndex::from(idx as u32),
+                        None => {
+                            // println!("find_convex_fast_iter: {curr_iter}, blah: {t:?}");
+                            return None;
+                        }
+                    }
+                };
+
+                let mut convex_set = HashSet::new();
+                convex_set.insert(start_node);
+
+                let sttt = std::time::Instant::now();
+                let moment_of_truth = blah(ell_out, &mut convex_set, graph, &level);
+                t += sttt.elapsed();
+
+                if moment_of_truth {
+                    assert!(convex_set.len() == ell_out);
+                    return_set = Some((start_node, convex_set));
+                    nodes.lock().unwrap().clear();
+                    break;
+                } else {
+                    curr_iter += 1;
+                }
+            }
+
+            #[cfg(feature = "trace")]
+            log::trace!("Find convex subcircuit iterations: {curr_iter}");
+
+            // println!("find_convex_fast_iter: {curr_iter}, blah: {t:?}");
+
+            return_set
+        })
+}
+
 fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
     graph: &Graph<usize, usize>,
     ell_out: usize,
@@ -853,12 +909,12 @@ fn circuit_to_collision_sets<G: Gate>(circuit: &Circuit<G>) -> Vec<HashSet<usize
     }
 
     // // Remove intsecting collisions. That is i can collide with j iff there is no k such that i < k < j with which both i & j collide
-    // for (i, _) in circuit.gates.iter().enumerate() {
+    // for (i, _) in circuit.gates().iter().enumerate() {
     //     // Don't update collision set i in place. Otherwise situations like the following are missed: Let i collide with j < k < l. '
     //     // If i^th collision set is updated in place then k is removed from the set after checking against j^th collision set. And i^th
     //     // collision set will never be checked against k. Hence, an incorrect (or say unecessary) dependency will be drawn from i to l.
     //     let mut collisions_set_i = all_collision_sets[i].clone();
-    //     for (j, _) in circuit.gates.iter().enumerate().skip(i + 1) {
+    //     for (j, _) in circuit.gates().iter().enumerate().skip(i + 1) {
     //         if all_collision_sets[i].contains(&j) {
     //             // remove id k from set of i iff k is in set of j (ie j, where j < k, collides with k)
     //             collisions_set_i.retain(|k| !all_collision_sets[j].contains(k));
@@ -935,7 +991,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
     let (cout_convex_start_node, cout_convex_subset) = timed!(
         "Find convex subcircuit",
-        match find_convex_fast(&skeleton_graph, ell_out, max_convex_iterations, rng) {
+        match find_convex_fast_pruned(&skeleton_graph, ell_out, max_convex_iterations, rng) {
             Some((convex_start_node, convex_subset)) => (convex_start_node, convex_subset),
             None => {
                 log::trace!("[returned false] Find convex subscircuit");
@@ -1106,8 +1162,8 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
     let (new_edges_preds, new_edges_succs) = rayon::join(
         || {
-            // Find all predecessors of C^out and add necessary edges upon collision
-            timed!("Find C^out's predecessors and add necessary edges", {
+            // Find all predecessors of C^out and find necessary edges upon collision
+            timed!("Find C^out's predecessors and find necessary edges", {
                 let mut path = vec![];
                 for node in c_out_imm_predecessors.iter() {
                     dfs(
@@ -1142,8 +1198,8 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             })
         },
         || {
-            timed!("Find C^out's successors and add necessary edges", {
-                // Find all successors of C^out and add necessary edges
+            timed!("Find C^out's successors and find necessary edges", {
+                // Find all successors of C^out find add necessary edges
                 let mut path = vec![];
                 for node in c_out_imm_successors.iter() {
                     dfs(
@@ -1180,49 +1236,71 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     new_edges.extend(new_edges_preds);
     new_edges.extend(new_edges_succs);
 
+    log::trace!(
+        "   Predecessors count: {}; Successors count: {}",
+        predecessors.len(),
+        successors.len()
+    );
+
     let mut cin_convex_subset = HashSet::new();
     c_in_nodes.iter().for_each(|n| {
         cin_convex_subset.insert(*n);
     });
 
     let mut outsiders = HashSet::new();
-    for node in skeleton_graph.node_indices() {
-        if !(successors.union(&predecessors)).contains(&node)
-            && !(cout_convex_subset.union(&cin_convex_subset)).contains(&node)
-        {
-            outsiders.insert(node);
+
+    timed!("Find outsiders", {
+        for node in skeleton_graph.node_indices() {
+            if !successors.contains(&node)
+                && !predecessors.contains(&node)
+                && cout_convex_subset.contains(&node)
+                && cin_convex_subset.contains(&node)
+            {
+                outsiders.insert(node);
+            }
         }
-    }
+    });
+
+    log::trace!("No. of outsiders: {}", outsiders.len());
 
     // Add edges from outsiders to colliding gates in C^in
-    for node in outsiders.iter() {
-        let node_gate = gate_map
-            .get(skeleton_graph.node_weight(*node).unwrap())
-            .unwrap();
-        let colliding_indices = c_in.gates().iter().enumerate().filter_map(|(index, gate)| {
-            if node_gate.check_collision(gate) {
-                Some(c_in_nodes[index])
-            } else {
-                None
-            }
-        });
-        colliding_indices.for_each(|target_node| {
-            new_edges.insert((*node, target_node));
-        });
-    }
+    timed!(
+        "Find new edges for outsiders",
+        for node in outsiders.iter() {
+            let node_gate = gate_map
+                .get(skeleton_graph.node_weight(*node).unwrap())
+                .unwrap();
+            let colliding_indices = c_in.gates().iter().enumerate().filter_map(|(index, gate)| {
+                if node_gate.check_collision(gate) {
+                    Some(c_in_nodes[index])
+                } else {
+                    None
+                }
+            });
+            colliding_indices.for_each(|target_node| {
+                new_edges.insert((*node, target_node));
+            });
+        }
+    );
 
-    for edge in new_edges {
-        skeleton_graph.add_edge(edge.0, edge.1, Default::default());
-    }
+    timed!(
+        "Add all new edges to the graph",
+        for edge in new_edges {
+            skeleton_graph.add_edge(edge.0, edge.1, Default::default());
+        }
+    );
 
     // Index of removed node is take over by the node that has the last index. Here we remove \ell^out nodes.
     // As long as \ell^out <= \ell^in (notice that C^in gates are added before removing gates of C^out) none of
     // pre-existing nodes we replace the removed node and hence we wouldn't incorrectly delete some node.
-    for node in cout_convex_subset {
-        gate_map
-            .remove(&skeleton_graph.remove_node(node).unwrap())
-            .unwrap();
-    }
+    timed!(
+        "Remove C^out from the graph",
+        for node in cout_convex_subset {
+            gate_map
+                .remove(&skeleton_graph.remove_node(node).unwrap())
+                .unwrap();
+        }
+    );
 
     return true;
 }
@@ -1549,7 +1627,10 @@ mod tests {
         }
     }
 
-    fn find_all_predecessors(node: NodeIndex, graph: &Graph<usize, usize>) -> HashSet<NodeIndex> {
+    fn find_all_predecessors_of_node(
+        node: NodeIndex,
+        graph: &Graph<usize, usize>,
+    ) -> HashSet<NodeIndex> {
         let mut all_preds = HashSet::new();
         for curr_node in graph.neighbors_directed(node, Direction::Incoming) {
             dfs(
@@ -1597,7 +1678,7 @@ mod tests {
                     for i in 0..convex_set_sorted.len() {
                         // find predecessors of i
                         let all_preds =
-                            find_all_predecessors(convex_set_sorted[i], &skeleton_graph);
+                            find_all_predecessors_of_node(convex_set_sorted[i], &skeleton_graph);
                         for j in i + 1..convex_set_sorted.len() {
                             assert!(!all_preds.contains(&convex_set_sorted[j]));
                         }
@@ -1719,10 +1800,75 @@ mod tests {
     //     replacement_circuit
     // }
 
+    fn find_all_predecessors(
+        convex_set: &HashSet<NodeIndex>,
+        graph: &Graph<usize, usize>,
+    ) -> HashSet<NodeIndex> {
+        // Find all predecessors and successors of subgrpah C^out
+        let mut imm_predecessors = HashSet::new();
+        let mut c_out_imm_successors = HashSet::new();
+        // First find all immediate predecessors and successors
+        for node in convex_set.iter() {
+            for pred in graph.neighbors_directed(node.clone(), Direction::Incoming) {
+                if !convex_set.contains(&pred) {
+                    imm_predecessors.insert(pred);
+                }
+            }
+            for succ in graph.neighbors_directed(node.clone(), Direction::Outgoing) {
+                if !convex_set.contains(&succ) {
+                    c_out_imm_successors.insert(succ);
+                }
+            }
+        }
+
+        let mut predecessors = HashSet::new();
+        for node in imm_predecessors {
+            dfs(
+                node,
+                &mut HashSet::new(),
+                &mut predecessors,
+                &mut vec![],
+                graph,
+                Direction::Incoming,
+            );
+        }
+
+        return predecessors;
+    }
+
+    fn find_all_successors(
+        convex_set: &HashSet<NodeIndex>,
+        graph: &Graph<usize, usize>,
+    ) -> HashSet<NodeIndex> {
+        let mut imm_successors = HashSet::new();
+        // First find all immediate predecessors and successors
+        for node in convex_set.iter() {
+            for succ in graph.neighbors_directed(node.clone(), Direction::Outgoing) {
+                if !convex_set.contains(&succ) {
+                    imm_successors.insert(succ);
+                }
+            }
+        }
+
+        let mut successors = HashSet::new();
+        for node in imm_successors {
+            dfs(
+                node,
+                &mut HashSet::new(),
+                &mut successors,
+                &mut vec![],
+                graph,
+                Direction::Outgoing,
+            );
+        }
+
+        return successors;
+    }
+
     #[test]
     fn time_convex_subcircuit() {
         env_logger::init();
-        let gates = 50000;
+        let gates = 40000;
         let n = 64;
         let ell_out = 4;
         let max_iterations = 10000;
@@ -1730,15 +1876,44 @@ mod tests {
         let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
         let skeleton_graph = circuit_to_skeleton_graph(&circuit);
 
-        let mut stats = Stats::new();
+        let mut stats0 = Stats::new();
+        let mut stats1 = Stats::new();
 
         for _ in 0..10 {
             let now = std::time::Instant::now();
-            let _ = find_convex_fast(&skeleton_graph, ell_out, max_iterations, &mut rng).unwrap();
-            stats.add_sample(now.elapsed().as_secs_f64());
+            let (_, v0) =
+                find_convex_fast(&skeleton_graph, ell_out, max_iterations, &mut rng).unwrap();
+            stats0.add_sample(now.elapsed().as_secs_f64());
+
+            let now = std::time::Instant::now();
+            let (_, v1) =
+                find_convex_fast_pruned(&skeleton_graph, ell_out, max_iterations, &mut rng)
+                    .unwrap();
+            stats1.add_sample(now.elapsed().as_secs_f64());
+
+            let (v0preds, v0succs) = (
+                find_all_predecessors(&v0, &skeleton_graph),
+                find_all_successors(&v0, &skeleton_graph),
+            );
+            let (v1preds, v1succs) = (
+                find_all_predecessors(&v1, &skeleton_graph),
+                find_all_successors(&v1, &skeleton_graph),
+            );
+
+            println!(
+                "[V0] predecessors={} successors={}",
+                v0preds.len(),
+                v0succs.len()
+            );
+            println!(
+                "[V1] predecessors={} successors={}",
+                v1preds.len(),
+                v1succs.len()
+            );
         }
 
-        println!("Average find convex runtime: {}", stats.average());
+        println!("Average find convex runtime: {}", stats0.average());
+        println!("Average find convex pruned runtime: {}", stats1.average());
     }
 
     #[test]
