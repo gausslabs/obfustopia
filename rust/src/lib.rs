@@ -581,7 +581,7 @@ fn dfs2(
     direction: Direction,
     break_when: usize,
     max_level: usize,
-    level: &HashMap<NodeIndex, usize>,
+    level: &[usize],
 ) -> bool {
     if visited_with_path.len() > break_when {
         return false;
@@ -594,7 +594,7 @@ fn dfs2(
         return true;
     }
 
-    if visited.contains(&curr_node) || level[&curr_node] >= max_level {
+    if visited.contains(&curr_node) || level[curr_node.index()] >= max_level {
         return true;
     }
 
@@ -628,7 +628,7 @@ fn blah(
     desire_set_size: usize,
     convex_set: &mut HashSet<NodeIndex>,
     graph: &Graph<usize, usize>,
-    level: &HashMap<NodeIndex, usize>,
+    level: &[usize],
 ) -> bool {
     if convex_set.len() == desire_set_size {
         return true;
@@ -694,7 +694,7 @@ fn blah(
             &graph,
             Direction::Outgoing,
             desire_set_size,
-            level[&candidate_node],
+            level[candidate_node.index()],
             level,
         );
 
@@ -719,7 +719,30 @@ fn blah(
     }
 }
 
-fn graph_level(graph: &Graph<usize, usize>) -> HashMap<NodeIndex, usize> {
+fn graph_level(graph: &Graph<usize, usize>) -> Vec<usize> {
+    // Copied from https://stackoverflow.com/a/65182786/7705999
+    struct UnsafeSlice<'a, T> {
+        slice: &'a [core::cell::UnsafeCell<T>],
+    }
+    unsafe impl<'a, T: Send + Sync> Send for UnsafeSlice<'a, T> {}
+    unsafe impl<'a, T: Send + Sync> Sync for UnsafeSlice<'a, T> {}
+
+    impl<'a, T> UnsafeSlice<'a, T> {
+        pub fn new(slice: &'a mut [T]) -> Self {
+            let ptr = slice as *mut [T] as *const [core::cell::UnsafeCell<T>];
+            Self {
+                slice: unsafe { &*ptr },
+            }
+        }
+
+        /// SAFETY: It is UB if two threads write to the same index without
+        /// synchronization.
+        pub unsafe fn write(&self, i: usize, value: T) {
+            let ptr = self.slice[i].get();
+            *ptr = value;
+        }
+    }
+
     let stack = Arc::new(Mutex::new(Vec::new()));
     let degree = (0..graph.node_count() as _)
         .into_par_iter()
@@ -732,46 +755,33 @@ fn graph_level(graph: &Graph<usize, usize>) -> HashMap<NodeIndex, usize> {
             (AtomicUsize::new(n_degree), AtomicUsize::new(0))
         })
         .collect::<Vec<_>>();
-    let level = (0..current_num_threads())
-        .into_par_iter()
-        .map(|_| {
-            let mut level = HashMap::new();
-            let mut next = None;
-            loop {
-                let Some(curr) = next.take().or_else(|| stack.lock().unwrap().pop()) else {
-                    break;
-                };
-                let curr_level = degree[curr.index()].1.load(Relaxed);
-                level.insert(curr, curr_level);
-                let mut succs = graph
-                    .neighbors_directed(curr, Direction::Outgoing)
-                    .flat_map(|succ| {
-                        let (succ_degree, succ_level) = &degree[succ.index()];
-                        let succ_degree = succ_degree.fetch_sub(1, Relaxed);
-                        succ_level
-                            .fetch_update(Relaxed, Relaxed, |succ_level| {
-                                Some(succ_level.max(curr_level + 1))
-                            })
-                            .unwrap();
-                        (succ_degree == 1).then_some(succ)
-                    })
-                    .collect_vec();
-                next = succs.pop();
+    let mut level = vec![0; graph.node_count()];
+    let level_slice = UnsafeSlice::new(&mut level);
+    (0..current_num_threads()).into_par_iter().for_each(|_| {
+        let mut next = None;
+        while let Some(curr) = next.take().or_else(|| stack.lock().unwrap().pop()) {
+            let curr_level = degree[curr.index()].1.load(Relaxed);
+            unsafe { level_slice.write(curr.index(), curr_level) };
+            let mut succs = graph
+                .neighbors_directed(curr, Direction::Outgoing)
+                .flat_map(|succ| {
+                    let (succ_degree, succ_level) = &degree[succ.index()];
+                    let succ_degree = succ_degree.fetch_sub(1, Relaxed);
+                    succ_level
+                        .fetch_update(Relaxed, Relaxed, |succ_level| {
+                            Some(succ_level.max(curr_level + 1))
+                        })
+                        .unwrap();
+                    (succ_degree == 1).then_some(succ)
+                })
+                .collect_vec();
+            next = succs.pop();
+            if !succs.is_empty() {
                 stack.lock().unwrap().extend(succs);
             }
-            level
-        })
-        .reduce(HashMap::new, |mut acc, level| {
-            acc.extend(level);
-            acc
-        });
-    debug_assert_eq!(level.len(), graph.node_count());
+        }
+    });
     level
-}
-
-#[test]
-fn time_graph_level() {
-    //
 }
 
 fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
@@ -1922,100 +1932,23 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn time_graph_level() {
+        let gates = 50000;
+        let n = 128;
+
+        let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+
+        let (original_circuit, _) =
+            sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
+        let graph = circuit_to_skeleton_graph(&original_circuit);
+
+        let n = 10;
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            graph_level(&graph);
+        }
+        dbg!(start.elapsed() / n);
+    }
 }
-
-// fn find_convex_subcircuit_slow<R: RngCore>(
-//     graph: &Graph<usize, usize>,
-//     ell_out: usize,
-//     max_iterations: usize,
-//     rng: &mut R,
-// ) -> Option<HashSet<NodeIndex>> {
-//     let mut curr_iter = 0;
-
-//     let mut final_convex_set = None;
-//     while curr_iter < max_iterations {
-//         let convex_set = {
-//             let start_node = NodeIndex::from(rng.gen_range(0..graph.node_count()) as u32);
-//             println!("New source!");
-//             let mut explored_candidates = HashSet::new();
-//             let mut unexplored_candidates = vec![];
-//             // TODO: Why does this always has to outgoing?
-//             for outgoing in graph.neighbors_directed(start_node, Outgoing) {
-//                 unexplored_candidates.push(outgoing);
-//             }
-
-//             println!("Unexplored candidates: {:?}", &unexplored_candidates);
-
-//             let mut convex_set = HashSet::new();
-//             convex_set.insert(start_node);
-
-//             while convex_set.len() < ell_out {
-//                 let candidate = unexplored_candidates.pop();
-
-//                 if candidate.is_none() {
-//                     break;
-//                 }
-
-//                 let mut union_vertices_visited_with_path = HashSet::new();
-//                 let mut union_vertices_visited = HashSet::new();
-//                 let mut path = vec![];
-//                 union_vertices_visited_with_path.insert(candidate.unwrap());
-//                 for source in convex_set.iter() {
-//                     dfs(
-//                         source.clone(),
-//                         &mut union_vertices_visited_with_path,
-//                         &mut union_vertices_visited,
-//                         &mut path,
-//                         graph,
-//                         Direction::Outgoing,
-//                     );
-
-//                     if union_vertices_visited_with_path.len() + convex_set.len() > ell_out {}
-//                 }
-
-//                 // Remove nodes in the exisiting convex set. The resulting set contains nodes that when added to convex set the set still remains convex.
-//                 union_vertices_visited_with_path.retain(|node| !convex_set.contains(node));
-
-//                 if union_vertices_visited_with_path.len() + convex_set.len() == ell_out {
-//                     union_vertices_visited_with_path.iter().for_each(|node| {
-//                         convex_set.insert(node.clone());
-//                     });
-
-//                     if convex_set.len() < ell_out {
-//                         // more exploration to do
-//                         union_vertices_visited_with_path
-//                             .into_iter()
-//                             .for_each(|node| {
-//                                 // add more candidates to explore
-//                                 for outgoing in graph.neighbors_directed(node, Outgoing) {
-//                                     if !explored_candidates.contains(&outgoing) {
-//                                         unexplored_candidates.push(outgoing);
-//                                     }
-//                                 }
-//                             });
-//                         explored_candidates.insert(candidate.unwrap());
-//                     }
-//                 } else {
-//                     println!(
-//                         "IGnored because total length is greater {:?}!",
-//                         union_vertices_visited_with_path.len() + convex_set.len()
-//                     );
-//                     explored_candidates.insert(candidate.unwrap());
-//                 }
-//             }
-//             convex_set
-//         };
-
-//         if convex_set.len() == ell_out {
-//             final_convex_set = Some(convex_set);
-//             break;
-//         } else {
-//             curr_iter += 1;
-//         }
-//     }
-
-//     #[cfg(feature = "trace")]
-//     log::trace!("Find convex subcircuit iterations: {curr_iter}");
-
-//     return final_convex_set;
-// }
