@@ -1325,17 +1325,17 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
     rng: &mut R,
     ell_out: usize,
     ell_in: usize,
+    mut mixing_steps: usize,
     total_mixing_steps: usize,
     max_convex_iterations: usize,
     max_replacement_iterations: usize,
+    mut cb: impl FnMut(usize, Circuit<BaseGate<2, u8>>),
 ) -> Graph<usize, usize> {
     if DEBUG {
         assert!(original_circuit.is_some());
     }
 
     let mut graph_neighbors = graph_neighbors(&skeleton_graph);
-
-    let mut mixing_steps = 0;
 
     while mixing_steps < total_mixing_steps {
         log::info!("############################## {stage_name} mixing step {mixing_steps} ##############################");
@@ -1362,7 +1362,9 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
         );
 
         if success {
-            if DEBUG {
+            mixing_steps += 1;
+
+            if DEBUG || mixing_steps % 100 == 0 {
                 let original_circuit = original_circuit.unwrap();
 
                 let top_sort_res = timed!(
@@ -1378,6 +1380,7 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
                             original_circuit.n(),
                         );
                         check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, rng);
+                        cb(mixing_steps, mixed_circuit);
                     }
                     Err(_) => {
                         log::error!("Cycle detected!");
@@ -1385,8 +1388,6 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
                     }
                 }
             }
-
-            mixing_steps += 1;
         }
     }
 
