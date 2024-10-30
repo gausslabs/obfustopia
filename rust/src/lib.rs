@@ -1,7 +1,7 @@
 use bitvec::{array::BitArray, bitarr, order::Lsb0, vec::BitVec};
 use circuit::{BaseGate, Circuit, Gate};
 use either::Either::{Left, Right};
-use itertools::{izip, Itertools};
+use itertools::{chain, izip, Itertools};
 use num_traits::Zero;
 use petgraph::{
     algo::toposort,
@@ -483,25 +483,25 @@ fn find_replacement_circuit_fast<R: Send + Sync + RngCore + SeedableRng>(
 
         // let mut visited_circuits = HashMap::new();
         let max_iterations = max_iterations / current_num_threads();
+        let found = AtomicBool::new(false);
 
         (0..current_num_threads())
             .map(|_| R::from_rng(&mut *rng).unwrap())
             .par_bridge()
             .find_map_any(|mut rng| {
+                let epoch_size = rng.gen_range(10..20);
                 let mut curr_iter = 0;
                 let mut replacement_circuit = None;
-
-                let mut t0 = Duration::default();
-                let mut t1 = Duration::default();
 
                 let mut random_circuit = Circuit::new(vec![BaseGate::new(0, 0, [0, 0]); ell_in], N);
 
                 while curr_iter < max_iterations {
-                    let start = std::time::Instant::now();
-                    sample_circuit_with_base_gate_fast(&mut random_circuit, N as u8, &mut rng);
-                    t0 += start.elapsed();
+                    if curr_iter % epoch_size == 0 && found.load(Relaxed) {
+                        return None;
+                    }
 
-                    let start = std::time::Instant::now();
+                    sample_circuit_with_base_gate_fast(&mut random_circuit, N as u8, &mut rng);
+
                     let mut funtionally_equivalent = true;
                     for (inputs, map) in &permutations {
                         let mut inputs = *inputs;
@@ -512,7 +512,6 @@ fn find_replacement_circuit_fast<R: Send + Sync + RngCore + SeedableRng>(
                             break;
                         }
                     }
-                    t1 += start.elapsed();
 
                     if funtionally_equivalent {
                         funtionally_equivalent = &random_circuit != circuit
@@ -527,6 +526,7 @@ fn find_replacement_circuit_fast<R: Send + Sync + RngCore + SeedableRng>(
 
                     if funtionally_equivalent {
                         replacement_circuit = Some(random_circuit);
+                        found.store(true, Relaxed);
                         break;
                     }
 
@@ -756,40 +756,65 @@ fn blah(
     }
 }
 
-fn graph_level(graph: &Graph<usize, usize>) -> Vec<usize> {
-    // Copied from https://stackoverflow.com/a/65182786/7705999
-    struct UnsafeSlice<'a, T> {
-        slice: &'a [core::cell::UnsafeCell<T>],
-    }
-    unsafe impl<'a, T: Send + Sync> Send for UnsafeSlice<'a, T> {}
-    unsafe impl<'a, T: Send + Sync> Sync for UnsafeSlice<'a, T> {}
+// Copied from https://stackoverflow.com/a/65182786/7705999
+struct UnsafeSlice<'a, T> {
+    slice: &'a [core::cell::UnsafeCell<T>],
+}
+unsafe impl<'a, T: Send + Sync> Send for UnsafeSlice<'a, T> {}
+unsafe impl<'a, T: Send + Sync> Sync for UnsafeSlice<'a, T> {}
 
-    impl<'a, T> UnsafeSlice<'a, T> {
-        pub fn new(slice: &'a mut [T]) -> Self {
-            let ptr = slice as *mut [T] as *const [core::cell::UnsafeCell<T>];
-            Self {
-                slice: unsafe { &*ptr },
-            }
-        }
-
-        /// SAFETY: It is UB if two threads write to the same index without
-        /// synchronization.
-        pub unsafe fn write(&self, i: usize, value: T) {
-            let ptr = self.slice[i].get();
-            *ptr = value;
+impl<'a, T> UnsafeSlice<'a, T> {
+    pub fn new(slice: &'a mut [T]) -> Self {
+        let ptr = slice as *mut [T] as *const [core::cell::UnsafeCell<T>];
+        Self {
+            slice: unsafe { &*ptr },
         }
     }
 
-    let stack = Arc::new(Mutex::new(Vec::new()));
-    let degree = (0..graph.node_count() as _)
+    /// SAFETY: It is UB if two threads write to the same index without
+    /// synchronization.
+    pub unsafe fn write(&self, i: usize, value: T) {
+        let ptr = self.slice[i].get();
+        *ptr = value;
+    }
+}
+
+fn graph_in_degree(graph: &Graph<usize, usize>) -> Vec<usize> {
+    (0..graph.node_count() as _)
         .into_par_iter()
         .map(|n| {
-            let n = NodeIndex::from(n);
-            let n_degree = graph.neighbors_directed(n, Direction::Incoming).count();
-            if n_degree == 0 {
-                stack.lock().unwrap().push(n);
+            graph
+                .neighbors_directed(NodeIndex::from(n), Direction::Incoming)
+                .count()
+        })
+        .collect()
+}
+
+fn update_graph_in_degree(
+    graph: &Graph<usize, usize>,
+    in_degree: &mut Vec<usize>,
+    nodes: HashSet<NodeIndex>,
+) {
+    in_degree.resize(graph.node_count(), 0);
+    let in_degree_slice = UnsafeSlice::new(in_degree);
+    nodes.into_par_iter().for_each(|n| unsafe {
+        in_degree_slice.write(
+            n.index(),
+            graph.neighbors_directed(n, Direction::Incoming).count(),
+        )
+    });
+}
+
+fn graph_level(graph: &Graph<usize, usize>, in_degree: &[usize]) -> Vec<usize> {
+    let stack = Arc::new(Mutex::new(Vec::new()));
+    let degree = in_degree
+        .par_iter()
+        .enumerate()
+        .map(|(n, degree)| {
+            if *degree == 0 {
+                stack.lock().unwrap().push(NodeIndex::from(n as u32));
             }
-            (AtomicUsize::new(n_degree), AtomicUsize::new(0))
+            (AtomicUsize::new(*degree), AtomicUsize::new(0))
         })
         .collect::<Vec<_>>();
     let mut level = vec![0; graph.node_count()];
@@ -823,11 +848,12 @@ fn graph_level(graph: &Graph<usize, usize>) -> Vec<usize> {
 
 fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
     graph: &Graph<usize, usize>,
+    in_degree: &[usize],
     ell_out: usize,
     max_iterations: usize,
     rng: &mut R,
 ) -> Option<(NodeIndex, HashSet<NodeIndex>)> {
-    let level = graph_level(graph);
+    let level = graph_level(graph, in_degree);
     let max_iterations = max_iterations / current_num_threads();
 
     let mut nodes = (0..graph.node_count()).collect_vec();
@@ -958,6 +984,7 @@ pub fn circuit_to_skeleton_graph<G: Gate>(circuit: &Circuit<G>) -> Graph<usize, 
 /// - Not able to find repalcement circuit after exhausting max_replacement_iterations iterations
 pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     skeleton_graph: &mut Graph<usize, usize>,
+    in_degree: &mut Vec<usize>,
     ell_in: usize,
     ell_out: usize,
     n: u8,
@@ -972,7 +999,13 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
     let (cout_convex_start_node, cout_convex_subset) = timed!(
         "Find convex subcircuit",
-        match find_convex_fast(&skeleton_graph, ell_out, max_convex_iterations, rng) {
+        match find_convex_fast(
+            &skeleton_graph,
+            in_degree,
+            ell_out,
+            max_convex_iterations,
+            rng
+        ) {
             Some((convex_start_node, convex_subset)) => (convex_start_node, convex_subset),
             None => {
                 log::trace!("[returned false] Find convex subscircuit");
@@ -1195,18 +1228,23 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         });
 
     new_edges.extend(new_edges_preds);
-    new_edges.extend(new_edges_succs);
+    new_edges.extend(new_edges_succs.iter().copied());
 
     let mut cin_convex_subset = HashSet::new();
     c_in_nodes.iter().for_each(|n| {
         cin_convex_subset.insert(*n);
     });
 
+    let insider = chain![
+        &successors,
+        &predecessors,
+        &cout_convex_subset,
+        &cin_convex_subset
+    ]
+    .collect::<HashSet<_>>();
     let mut outsiders = HashSet::new();
     for node in skeleton_graph.node_indices() {
-        if !(successors.union(&predecessors)).contains(&node)
-            && !(cout_convex_subset.union(&cin_convex_subset)).contains(&node)
-        {
+        if !insider.contains(&node) {
             outsiders.insert(node);
         }
     }
@@ -1235,11 +1273,23 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     // Index of removed node is take over by the node that has the last index. Here we remove \ell^out nodes.
     // As long as \ell^out <= \ell^in (notice that C^in gates are added before removing gates of C^out) none of
     // pre-existing nodes we replace the removed node and hence we wouldn't incorrectly delete some node.
-    for node in cout_convex_subset {
+    for node in &cout_convex_subset {
         gate_map
-            .remove(&skeleton_graph.remove_node(node).unwrap())
+            .remove(&skeleton_graph.remove_node(*node).unwrap())
             .unwrap();
     }
+
+    update_graph_in_degree(
+        skeleton_graph,
+        in_degree,
+        chain![
+            cout_convex_subset,
+            c_out_imm_successors,
+            new_edges_succs.iter().map(|e| e.1),
+            c_in_nodes.into_iter().take(ell_in - ell_out)
+        ]
+        .collect(),
+    );
 
     return true;
 }
@@ -1262,6 +1312,8 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
         assert!(original_circuit.is_some());
     }
 
+    let mut in_degree = graph_in_degree(&skeleton_graph);
+
     let mut mixing_steps = 0;
 
     while mixing_steps < total_mixing_steps {
@@ -1270,6 +1322,7 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
         let now = std::time::Instant::now();
         let success = local_mixing_step::<_>(
             &mut skeleton_graph,
+            &mut in_degree,
             ell_in,
             ell_out,
             n,
@@ -1359,12 +1412,8 @@ pub fn check_probabilisitic_equivalence<G, R: RngCore>(
 
 #[cfg(test)]
 mod tests {
-
-    use std::usize;
-
     use petgraph::{
         algo::{all_simple_paths, connected_components, has_path_connecting, toposort},
-        graph::Node,
         visit::{Dfs, Reversed, Visitable, Walker},
     };
     use rand::{thread_rng, SeedableRng};
@@ -1396,6 +1445,8 @@ mod tests {
         let max_convex_iterations = 1000usize;
         let max_replacement_iterations = 1000000usize;
 
+        let mut in_degree = graph_in_degree(&skeleton_graph);
+
         let mut mixing_steps = 0;
         let total_mixing_steps = 100;
 
@@ -1409,6 +1460,7 @@ mod tests {
 
             let success = local_mixing_step::<_>(
                 &mut skeleton_graph,
+                &mut in_degree,
                 ell_in,
                 ell_out,
                 n,
@@ -1527,9 +1579,15 @@ mod tests {
         while iter < 1000 {
             let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
             let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+            let in_degree = graph_in_degree(&skeleton_graph);
 
-            let convex_subgraph =
-                find_convex_fast(&skeleton_graph, ell_out, max_iterations, &mut rng);
+            let convex_subgraph = find_convex_fast(
+                &skeleton_graph,
+                &in_degree,
+                ell_out,
+                max_iterations,
+                &mut rng,
+            );
 
             match convex_subgraph {
                 Some((start_node, convex_subgraph)) => {
@@ -1595,9 +1653,15 @@ mod tests {
         while iter < 100 {
             let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
             let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+            let in_degree = graph_in_degree(&skeleton_graph);
 
-            let convex_subgraph =
-                find_convex_fast(&skeleton_graph, ell_out, max_iterations, &mut rng);
+            let convex_subgraph = find_convex_fast(
+                &skeleton_graph,
+                &in_degree,
+                ell_out,
+                max_iterations,
+                &mut rng,
+            );
 
             match convex_subgraph {
                 Some((start_node, convex_subgraph)) => {
@@ -1674,69 +1738,6 @@ mod tests {
         }
     }
 
-    // fn find_replacement_circuit2(
-    //     circuit: &Circuit<BaseGate<2, u8>>,
-    //     ell_in: usize,
-    //     n: u8,
-    //     two_prob: f64,
-    //     max_iterations: usize,
-    //     rng: &mut impl RngCore,
-    // ) -> Option<Circuit<BaseGate<2, u8>>> {
-    //     let input_value_to_bitstring_map = input_value_to_bitstring_map(circuit.n);
-    //     let permutation_map = permutation_map(circuit, &input_value_to_bitstring_map);
-
-    //     let mut curr_iter = 0;
-    //     let mut replacement_circuit = None;
-    //     let mut visited_circuits = HashMap::new();
-
-    //     while curr_iter < max_iterations {
-    //         let (random_circuit, circuit_trace) =
-    //             sample_circuit_with_base_gate::<2, u8, _>(ell_in, n, two_prob, rng);
-
-    //         match visited_circuits.entry(circuit_trace) {
-    //             Entry::Vacant(entry) => {
-    //                 entry.insert(1);
-
-    //                 let mut funtionally_equivalent = true;
-    //                 for (value, bitstring) in input_value_to_bitstring_map.iter() {
-    //                     let mut inputs = bitstring.to_vec();
-    //                     random_circuit.run(&mut inputs);
-
-    //                     if &inputs != permutation_map.get(value).unwrap() {
-    //                         funtionally_equivalent = false;
-    //                         break;
-    //                     }
-    //                 }
-
-    //                 if funtionally_equivalent {
-    //                     let collisions_set = circuit_to_collision_sets(&random_circuit);
-    //                     let is_weakly_connected =
-    //                         is_collisions_set_weakly_connected(&collisions_set);
-    //                     if funtionally_equivalent && !is_weakly_connected {
-    //                         log::trace!("[find_replacement_circuit] wft");
-    //                     }
-    //                     funtionally_equivalent = is_weakly_connected;
-    //                 }
-
-    //                 if funtionally_equivalent {
-    //                     replacement_circuit = Some(random_circuit);
-    //                     break;
-    //                 }
-    //             }
-    //             Entry::Occupied(mut entry) => *entry.get_mut() += 1,
-    //         }
-
-    //         curr_iter += 1;
-
-    //         #[cfg(feature = "trace")]
-    //         if curr_iter % 10000000 == 0 {
-    //             log::trace!("[find_replacement_circuit] 100K iterations done");
-    //         }
-    //     }
-
-    //     replacement_circuit
-    // }
-
     #[test]
     fn time_convex_subcircuit() {
         env_logger::init();
@@ -1747,12 +1748,20 @@ mod tests {
         let mut rng = ChaCha8Rng::from_entropy();
         let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
         let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+        let in_degree = graph_in_degree(&skeleton_graph);
 
         let mut stats = Stats::new();
 
         for _ in 0..10 {
             let now = std::time::Instant::now();
-            let _ = find_convex_fast(&skeleton_graph, ell_out, max_iterations, &mut rng).unwrap();
+            let _ = find_convex_fast(
+                &skeleton_graph,
+                &in_degree,
+                ell_out,
+                max_iterations,
+                &mut rng,
+            )
+            .unwrap();
             stats.add_sample(now.elapsed().as_secs_f64());
         }
 
@@ -1768,7 +1777,7 @@ mod tests {
         let mut rng = thread_rng();
         let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
         let skeleton_graph = circuit_to_skeleton_graph(&circuit);
-        let level = graph_level(&skeleton_graph);
+        let level = graph_level(&skeleton_graph, &graph_in_degree(&skeleton_graph));
 
         let mut stats = Stats::new();
 
@@ -1785,172 +1794,6 @@ mod tests {
         println!("Average blah runtime: {}", stats.average());
     }
 
-    fn sample_c_out(
-        n: usize,
-        ell_out: usize,
-        rng: &mut (impl Send + Sync + RngCore + SeedableRng),
-    ) -> Circuit<BaseGate<2, u8>> {
-        // let mut original_circuit = Circuit::new(vec![BaseGate::new(0, 0, [0, 0]); 200], 200);
-        let mut t = Duration::default();
-        let mut c = 0;
-        loop {
-            // sample_circuit_with_base_gate_fast(&mut original_circuit, 200 as u8, rng);
-            let (original_circuit, _) =
-                sample_circuit_with_base_gate::<2, usize, _>(20000, 64, 1.0, rng);
-
-            // if original_circuit.n() != n {
-            //     continue;
-            // }
-
-            let skeleton_graph = circuit_to_skeleton_graph(&original_circuit);
-            let top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
-            let mut latest_id = 0;
-            let mut gate_map = HashMap::new();
-            original_circuit.gates().iter().for_each(|g| {
-                latest_id = std::cmp::max(latest_id, g.id());
-                gate_map.insert(g.id(), g.clone());
-            });
-
-            let start = std::time::Instant::now();
-            let a = find_convex_fast(&skeleton_graph, ell_out, 10000, rng);
-            t += start.elapsed();
-            c += 1;
-            match a {
-                Some((start_node, convex_subset)) => {
-                    // Convex subset sorted in topological order
-                    let convex_subgraph_top_sorted_gate_ids = top_sorted_nodes
-                        .iter()
-                        .filter(|v| convex_subset.contains(v))
-                        .map(|node_index| skeleton_graph.node_weight(*node_index).unwrap());
-
-                    let convex_subgraph_gates =
-                        convex_subgraph_top_sorted_gate_ids.map(|node| gate_map.get(node).unwrap());
-
-                    // Set of active wires in convex subgraph
-                    let mut omega_out = HashSet::new();
-                    convex_subgraph_gates.clone().for_each(|g| {
-                        omega_out.insert(g.target());
-                        for wire in g.controls().iter() {
-                            omega_out.insert(*wire);
-                        }
-                    });
-
-                    assert!(omega_out.len() > 3);
-
-                    // Map from old wires to new wires in C^out
-                    let mut old_to_new_map = HashMap::new();
-                    let mut new_to_old_map = HashMap::new();
-                    for (new_index, old_index) in omega_out.iter().enumerate() {
-                        old_to_new_map.insert(*old_index, new_index as u8);
-                        new_to_old_map.insert(new_index as u8, *old_index);
-                    }
-                    let c_out_gates = convex_subgraph_gates
-                        .clone()
-                        .enumerate()
-                        .map(|(index, gate)| {
-                            let old_controls = gate.controls();
-                            let mut new_controls = [0; 2];
-                            new_controls[0] = *old_to_new_map.get(&old_controls[0]).unwrap();
-                            new_controls[1] = *old_to_new_map.get(&old_controls[1]).unwrap();
-                            BaseGate::<2, u8>::new(
-                                index,
-                                *old_to_new_map.get(&gate.target()).unwrap(),
-                                new_controls,
-                            )
-                        })
-                        .collect_vec();
-
-                    let c_out = Circuit::new(c_out_gates, omega_out.len());
-
-                    if c_out.n() == n {
-                        // println!("find_convex_fast: {:?} ({c})", t / c);
-                        return c_out;
-                    } else {
-                        continue;
-                    }
-                }
-                None => continue,
-            }
-        }
-    }
-
-    #[test]
-    fn sample_c_outs() {
-        env_logger::init();
-
-        let mut rng = ChaCha8Rng::from_entropy();
-
-        let ell_out = 5;
-        let ell_in = ell_out;
-
-        let mut iter = 0;
-
-        for n in 5..12 {
-            let mut samples = Vec::new();
-            loop {
-                // println!("sample_c_out");
-                let c_out = sample_c_out(11, ell_out, &mut rng);
-
-                assert_eq!(c_out.n(), 11);
-                // assert_eq!(c_out.gates().len(), ell_out);
-
-                // println!("find_replacement_circuit_fast");
-                if let Some(c_in) = find_replacement_circuit_fast(
-                    &c_out,
-                    ell_in,
-                    c_out.n() as _,
-                    1000000 * n,
-                    &mut rng,
-                ) {
-                    check_probabilisitic_equivalence(&c_out, &c_in, &mut rng);
-                    samples.push(c_out);
-                    println!("samples.len() = {}", samples.len());
-                    if samples.len() == 10 {
-                        std::fs::write(
-                            format!("./10-26/samples-{n}"),
-                            bincode::serialize(&samples).unwrap(),
-                        )
-                        .unwrap();
-                        break;
-                    }
-                }
-
-                iter += 1;
-                if iter % 100 == 0 {
-                    println!("sampled {iter}")
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn replace_sampled_c_outs() {
-        env_logger::init();
-
-        let mut rng = ChaCha8Rng::from_entropy();
-
-        let ell_out = 5;
-        let ell_in = ell_out;
-
-        for n in 5..9 {
-            let samples: Vec<Circuit<BaseGate<2, u8>>> =
-                bincode::deserialize(&std::fs::read(format!("./10-25/samples-{n}")).unwrap())
-                    .unwrap();
-            for (idx, c_out) in samples.iter().enumerate() {
-                let start = std::time::Instant::now();
-                loop {
-                    if let Some(c_in) =
-                        find_replacement_circuit_fast(c_out, ell_in, n, 500000 * n, &mut rng)
-                    {
-                        check_probabilisitic_equivalence(c_out, &c_in, &mut rng);
-                        break;
-                    }
-                }
-                println!("{n}: {idx}/{} ({:?})", samples.len(), start.elapsed());
-            }
-        }
-    }
-
     #[test]
     fn time_graph_level() {
         let gates = 50000;
@@ -1961,11 +1804,12 @@ mod tests {
         let (original_circuit, _) =
             sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
         let graph = circuit_to_skeleton_graph(&original_circuit);
+        let in_degree = graph_in_degree(&graph);
 
         let n = 10;
         let start = std::time::Instant::now();
         for _ in 0..n {
-            graph_level(&graph);
+            graph_level(&graph, &in_degree);
         }
         dbg!(start.elapsed() / n);
     }
