@@ -777,44 +777,58 @@ impl<'a, T> UnsafeSlice<'a, T> {
         let ptr = self.slice[i].get();
         *ptr = value;
     }
+
+    /// SAFETY: It is UB if two threads update the same index without
+    /// synchronization.
+    pub unsafe fn update(&self, i: usize, f: impl Fn(&mut T)) {
+        let ptr = self.slice[i].get();
+        f(&mut *ptr);
+    }
 }
 
-fn graph_in_degree(graph: &Graph<usize, usize>) -> Vec<usize> {
+fn graph_neighbors(graph: &Graph<usize, usize>) -> Vec<[HashSet<NodeIndex>; 2]> {
     (0..graph.node_count() as _)
         .into_par_iter()
         .map(|n| {
-            graph
-                .neighbors_directed(NodeIndex::from(n), Direction::Incoming)
-                .count()
+            [Direction::Incoming, Direction::Outgoing]
+                .map(|dir| graph.neighbors_directed(NodeIndex::from(n), dir).collect())
         })
         .collect()
 }
 
-fn update_graph_in_degree(
+fn update_graph_neighbors(
     graph: &Graph<usize, usize>,
-    in_degree: &mut Vec<usize>,
-    nodes: HashSet<NodeIndex>,
+    in_degree: &mut Vec<[HashSet<NodeIndex>; 2]>,
+    incoming: HashSet<NodeIndex>,
+    outgoing: HashSet<NodeIndex>,
 ) {
-    in_degree.resize(graph.node_count(), 0);
+    in_degree.resize_with(graph.node_count(), Default::default);
     let in_degree_slice = UnsafeSlice::new(in_degree);
-    nodes.into_par_iter().for_each(|n| unsafe {
-        in_degree_slice.write(
-            n.index(),
-            graph.neighbors_directed(n, Direction::Incoming).count(),
-        )
+    incoming.into_par_iter().for_each(|n| unsafe {
+        in_degree_slice.update(n.index(), |[incoming, _]| {
+            *incoming = graph.neighbors_directed(n, Direction::Incoming).collect()
+        })
+    });
+    outgoing.into_par_iter().for_each(|n| unsafe {
+        in_degree_slice.update(n.index(), |[_, outgoing]| {
+            *outgoing = graph.neighbors_directed(n, Direction::Outgoing).collect()
+        })
     });
 }
 
-fn graph_level(graph: &Graph<usize, usize>, in_degree: &[usize]) -> Vec<usize> {
+fn graph_level(
+    graph: &Graph<usize, usize>,
+    graph_neighbors: &[[HashSet<NodeIndex>; 2]],
+) -> Vec<usize> {
     let stack = Arc::new(Mutex::new(Vec::new()));
-    let degree = in_degree
+    let degree = graph_neighbors
         .par_iter()
         .enumerate()
-        .map(|(n, degree)| {
-            if *degree == 0 {
+        .map(|(n, [incomings, _])| {
+            if incomings.is_empty() {
                 stack.lock().unwrap().push(NodeIndex::from(n as u32));
             }
-            (AtomicUsize::new(*degree), AtomicUsize::new(0))
+            (AtomicUsize::new(incomings.len()), AtomicUsize::new(0))
         })
         .collect::<Vec<_>>();
     let mut level = vec![0; graph.node_count()];
@@ -824,8 +838,8 @@ fn graph_level(graph: &Graph<usize, usize>, in_degree: &[usize]) -> Vec<usize> {
         while let Some(curr) = next.take().or_else(|| stack.lock().unwrap().pop()) {
             let curr_level = degree[curr.index()].1.load(Relaxed);
             unsafe { level_slice.write(curr.index(), curr_level) };
-            let mut succs = graph
-                .neighbors_directed(curr, Direction::Outgoing)
+            let mut succs = graph_neighbors[curr.index()][1]
+                .iter()
                 .flat_map(|succ| {
                     let (succ_degree, succ_level) = &degree[succ.index()];
                     let succ_degree = succ_degree.fetch_sub(1, Relaxed);
@@ -834,7 +848,7 @@ fn graph_level(graph: &Graph<usize, usize>, in_degree: &[usize]) -> Vec<usize> {
                             Some(succ_level.max(curr_level + 1))
                         })
                         .unwrap();
-                    (succ_degree == 1).then_some(succ)
+                    (succ_degree == 1).then_some(*succ)
                 })
                 .collect_vec();
             next = succs.pop();
@@ -848,34 +862,31 @@ fn graph_level(graph: &Graph<usize, usize>, in_degree: &[usize]) -> Vec<usize> {
 
 fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
     graph: &Graph<usize, usize>,
-    in_degree: &[usize],
+    graph_neighbors: &[[HashSet<NodeIndex>; 2]],
     ell_out: usize,
     max_iterations: usize,
     rng: &mut R,
 ) -> Option<(NodeIndex, HashSet<NodeIndex>)> {
-    let level = graph_level(graph, in_degree);
+    let level = graph_level(graph, graph_neighbors);
     let max_iterations = max_iterations / current_num_threads();
 
-    let mut nodes = (0..graph.node_count()).collect_vec();
-    nodes.shuffle(rng);
-    let nodes = Arc::new(Mutex::new(nodes));
+    let found = AtomicBool::new(false);
 
     (0..current_num_threads())
-        .into_par_iter()
-        .find_map_any(|_| {
+        .map(|_| R::from_rng(&mut *rng).unwrap())
+        .par_bridge()
+        .find_map_any(|mut rng| {
+            let epoch_size = rng.gen_range(5..10);
             let mut t = Duration::default();
             let mut curr_iter = 0;
             let mut return_set = None;
-            while curr_iter < max_iterations {
-                let start_node = {
-                    match nodes.lock().unwrap().pop() {
-                        Some(idx) => NodeIndex::from(idx as u32),
-                        None => {
-                            // println!("find_convex_fast_iter: {curr_iter}, blah: {t:?}");
-                            return None;
-                        }
-                    }
-                };
+            for start_node in repeat_with(|| rng.gen_range(0..graph.node_count() as u32))
+                .map(NodeIndex::from)
+                .take(max_iterations)
+            {
+                if curr_iter % epoch_size == 0 && found.load(Relaxed) {
+                    return None;
+                }
 
                 let mut convex_set = HashSet::new();
                 convex_set.insert(start_node);
@@ -887,7 +898,7 @@ fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
                 if moment_of_truth {
                     assert!(convex_set.len() == ell_out);
                     return_set = Some((start_node, convex_set));
-                    nodes.lock().unwrap().clear();
+                    found.store(true, Relaxed);
                     break;
                 } else {
                     curr_iter += 1;
@@ -984,7 +995,7 @@ pub fn circuit_to_skeleton_graph<G: Gate>(circuit: &Circuit<G>) -> Graph<usize, 
 /// - Not able to find repalcement circuit after exhausting max_replacement_iterations iterations
 pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     skeleton_graph: &mut Graph<usize, usize>,
-    in_degree: &mut Vec<usize>,
+    neighbors: &mut Vec<[HashSet<NodeIndex>; 2]>,
     ell_in: usize,
     ell_out: usize,
     n: u8,
@@ -1001,7 +1012,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         "Find convex subcircuit",
         match find_convex_fast(
             &skeleton_graph,
-            in_degree,
+            neighbors,
             ell_out,
             max_convex_iterations,
             rng
@@ -1227,7 +1238,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             (successors, new_edges)
         });
 
-    new_edges.extend(new_edges_preds);
+    new_edges.extend(new_edges_preds.iter().copied());
     new_edges.extend(new_edges_succs.iter().copied());
 
     let mut cin_convex_subset = HashSet::new();
@@ -1250,6 +1261,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     }
 
     // Add edges from outsiders to colliding gates in C^in
+    let mut new_edges_outs = HashSet::new();
     for node in outsiders.iter() {
         let node_gate = gate_map
             .get(skeleton_graph.node_weight(*node).unwrap())
@@ -1262,6 +1274,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             }
         });
         colliding_indices.for_each(|target_node| {
+            new_edges_outs.insert(*node);
             new_edges.insert((*node, target_node));
         });
     }
@@ -1279,14 +1292,22 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             .unwrap();
     }
 
-    update_graph_in_degree(
+    update_graph_neighbors(
         skeleton_graph,
-        in_degree,
+        neighbors,
         chain![
-            cout_convex_subset,
+            cout_convex_subset.iter().copied(),
+            c_in_nodes.iter().take(ell_in - ell_out).copied(),
             c_out_imm_successors,
             new_edges_succs.iter().map(|e| e.1),
-            c_in_nodes.into_iter().take(ell_in - ell_out)
+        ]
+        .collect(),
+        chain![
+            cout_convex_subset.iter().copied(),
+            c_in_nodes.iter().take(ell_in - ell_out).copied(),
+            c_out_imm_predecessors,
+            new_edges_preds.iter().map(|e| e.0),
+            new_edges_outs,
         ]
         .collect(),
     );
@@ -1312,7 +1333,7 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
         assert!(original_circuit.is_some());
     }
 
-    let mut in_degree = graph_in_degree(&skeleton_graph);
+    let mut graph_neighbors = graph_neighbors(&skeleton_graph);
 
     let mut mixing_steps = 0;
 
@@ -1322,7 +1343,7 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
         let now = std::time::Instant::now();
         let success = local_mixing_step::<_>(
             &mut skeleton_graph,
-            &mut in_degree,
+            &mut graph_neighbors,
             ell_in,
             ell_out,
             n,
@@ -1445,7 +1466,7 @@ mod tests {
         let max_convex_iterations = 1000usize;
         let max_replacement_iterations = 1000000usize;
 
-        let mut in_degree = graph_in_degree(&skeleton_graph);
+        let mut graph_neighbors = graph_neighbors(&skeleton_graph);
 
         let mut mixing_steps = 0;
         let total_mixing_steps = 100;
@@ -1460,7 +1481,7 @@ mod tests {
 
             let success = local_mixing_step::<_>(
                 &mut skeleton_graph,
-                &mut in_degree,
+                &mut graph_neighbors,
                 ell_in,
                 ell_out,
                 n,
@@ -1579,11 +1600,11 @@ mod tests {
         while iter < 1000 {
             let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
             let skeleton_graph = circuit_to_skeleton_graph(&circuit);
-            let in_degree = graph_in_degree(&skeleton_graph);
+            let graph_neighbors = graph_neighbors(&skeleton_graph);
 
             let convex_subgraph = find_convex_fast(
                 &skeleton_graph,
-                &in_degree,
+                &graph_neighbors,
                 ell_out,
                 max_iterations,
                 &mut rng,
@@ -1653,11 +1674,11 @@ mod tests {
         while iter < 100 {
             let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
             let skeleton_graph = circuit_to_skeleton_graph(&circuit);
-            let in_degree = graph_in_degree(&skeleton_graph);
+            let graph_neighbors = graph_neighbors(&skeleton_graph);
 
             let convex_subgraph = find_convex_fast(
                 &skeleton_graph,
-                &in_degree,
+                &graph_neighbors,
                 ell_out,
                 max_iterations,
                 &mut rng,
@@ -1741,14 +1762,14 @@ mod tests {
     #[test]
     fn time_convex_subcircuit() {
         env_logger::init();
-        let gates = 50000;
-        let n = 64;
-        let ell_out = 4;
+        let gates = 53000;
+        let n = 128;
+        let ell_out = 2;
         let max_iterations = 10000;
         let mut rng = ChaCha8Rng::from_entropy();
         let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
         let skeleton_graph = circuit_to_skeleton_graph(&circuit);
-        let in_degree = graph_in_degree(&skeleton_graph);
+        let graph_neighbors = graph_neighbors(&skeleton_graph);
 
         let mut stats = Stats::new();
 
@@ -1756,7 +1777,7 @@ mod tests {
             let now = std::time::Instant::now();
             let _ = find_convex_fast(
                 &skeleton_graph,
-                &in_degree,
+                &graph_neighbors,
                 ell_out,
                 max_iterations,
                 &mut rng,
@@ -1777,7 +1798,7 @@ mod tests {
         let mut rng = thread_rng();
         let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
         let skeleton_graph = circuit_to_skeleton_graph(&circuit);
-        let level = graph_level(&skeleton_graph, &graph_in_degree(&skeleton_graph));
+        let level = graph_level(&skeleton_graph, &graph_neighbors(&skeleton_graph));
 
         let mut stats = Stats::new();
 
@@ -1804,12 +1825,12 @@ mod tests {
         let (original_circuit, _) =
             sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
         let graph = circuit_to_skeleton_graph(&original_circuit);
-        let in_degree = graph_in_degree(&graph);
+        let graph_neighbors = graph_neighbors(&graph);
 
         let n = 10;
         let start = std::time::Instant::now();
         for _ in 0..n {
-            graph_level(&graph, &in_degree);
+            graph_level(&graph, &graph_neighbors);
         }
         dbg!(start.elapsed() / n);
     }
