@@ -4,8 +4,8 @@ use rand_chacha::ChaCha8Rng;
 use rust::{
     check_probabilisitic_equivalence,
     circuit::{BaseGate, Circuit, Gate},
-    circuit_to_skeleton_graph, local_mixing_step, node_indices_to_gate_ids, run_local_mixing,
-    sample_circuit_with_base_gate, timed,
+    circuit_to_skeleton_graph, local_mixing_step, node_indices_to_gate_ids, prepare_circuit,
+    run_local_mixing, sample_circuit_with_base_gate, timed,
 };
 use std::collections::HashMap;
 
@@ -13,29 +13,31 @@ fn main() {
     log4rs::init_file("log4rs.yaml", Default::default()).unwrap();
     // env_logger::init();
 
-    let gates = 50000;
-    let n = 128;
+    let gates = 20;
+    let n = 8;
     let max_convex_iterations = 10000usize;
     let max_replacement_iterations = 1000000usize;
 
     let mut rng = ChaCha8Rng::from_entropy();
 
     let (original_circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-    let skeleton_graph = circuit_to_skeleton_graph(&original_circuit);
-    let mut latest_id = 0;
-    let mut gate_map = HashMap::new();
-    original_circuit.gates().iter().for_each(|g| {
-        latest_id = std::cmp::max(latest_id, g.id());
-        gate_map.insert(g.id(), g.clone());
-    });
+    let (
+        mut direct_connections,
+        mut skeleton_graph,
+        mut gate_id_to_node_index_map,
+        mut gate_map,
+        mut latest_id,
+    ) = prepare_circuit(&original_circuit);
 
     // Inflationary stage
     let inflationary_stage_steps = 50000;
-    let skeleton_graph = run_local_mixing::<false, _>(
+    let skeleton_graph = run_local_mixing::<true, _>(
         "Inflationary stage",
         Some(&original_circuit),
         skeleton_graph,
+        &mut direct_connections,
         &mut gate_map,
+        &mut gate_id_to_node_index_map,
         &mut latest_id,
         n,
         &mut rng,
@@ -66,11 +68,13 @@ fn main() {
     );
 
     let kneading_stage_steps = 50000;
-    let skeleton_graph = run_local_mixing::<false, _>(
+    let skeleton_graph = run_local_mixing::<true, _>(
         "Kneading stage",
         Some(&original_circuit),
         skeleton_graph,
+        &mut direct_connections,
         &mut gate_map,
+        &mut gate_id_to_node_index_map,
         &mut latest_id,
         n,
         &mut rng,
