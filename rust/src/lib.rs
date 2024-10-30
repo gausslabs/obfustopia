@@ -208,12 +208,18 @@ where
             let mut controls = [D::zero(); MAX_K];
             controls[0] = iter.next().unwrap();
             controls[1] = iter.next().unwrap();
+            let control_func = rng.next_u64() as u8 % BaseGate::<MAX_K, D>::N_CONTROL_FUNC;
 
             // sample_trace.update(format!("TWO{target}{}{}", controls[0], controls[1],));
 
             curr_gate += two_replacement_cost;
 
-            gates.push(BaseGate::<MAX_K, D>::new(id, target, controls));
+            gates.push(BaseGate::<MAX_K, D>::new(
+                id,
+                target,
+                controls,
+                control_func,
+            ));
         } else {
             assert!(MAX_K == 3);
             let if_true_three = rng.gen_bool(1.0 - two_prob);
@@ -226,7 +232,12 @@ where
                 for i in 0..MAX_K {
                     controls[i] = iter.next().unwrap();
                 }
-
+                let control_func = loop {
+                    let v = rng.next_u64() as u8;
+                    if v < BaseGate::<MAX_K, D>::N_CONTROL_FUNC {
+                        break v;
+                    }
+                };
                 // sample_trace.update(format!(
                 //     "THREE{target}{}{}{}",
                 //     controls[0], controls[1], controls[2]
@@ -234,7 +245,12 @@ where
 
                 curr_gate += three_replacement_cost;
 
-                gates.push(BaseGate::<MAX_K, D>::new(id, target, controls));
+                gates.push(BaseGate::<MAX_K, D>::new(
+                    id,
+                    target,
+                    controls,
+                    control_func,
+                ));
             } else {
                 // sample 2 way CNOTs
                 let unique_vals = sample_m_unique_values::<3, _, _>(rng, &distribution);
@@ -248,11 +264,23 @@ where
                 // With MAX_K = 3, if any gate has 2 controls then set the last control = n. n indicates useless slot.
                 controls[2] = n;
 
+                let control_func = loop {
+                    let v = rng.next_u64() as u8;
+                    if v < BaseGate::<MAX_K, D>::N_CONTROL_FUNC {
+                        break v;
+                    }
+                };
+
                 // sample_trace.update(format!("TWO{target}{}{}", controls[0], controls[1],));
 
                 curr_gate += two_replacement_cost;
 
-                gates.push(BaseGate::<MAX_K, D>::new(id, target, controls));
+                gates.push(BaseGate::<MAX_K, D>::new(
+                    id,
+                    target,
+                    controls,
+                    control_func,
+                ));
             };
         }
 
@@ -264,7 +292,7 @@ where
     (Circuit::new(gates, n.into()), String::new())
 }
 
-pub fn sample_circuit_with_base_gate_fast<R: RngCore>(
+pub fn sample_circuit_with_base_gate_fast<R: Rng>(
     circuit: &mut Circuit<BaseGate<2, u8>>,
     n: u8,
     rng: &mut R,
@@ -285,7 +313,8 @@ pub fn sample_circuit_with_base_gate_fast<R: RngCore>(
                 break (v >> 4);
             }
         });
-        *gate = BaseGate::<2, u8>::new(id, t, [c0, c1]);
+        let control_func = rng.next().unwrap() % BaseGate::<2, u8>::N_CONTROL_FUNC;
+        *gate = BaseGate::<2, u8>::new(id, t, [c0, c1], control_func);
     });
 }
 
@@ -475,7 +504,7 @@ fn find_replacement_circuit_fast<R: Send + Sync + RngCore + SeedableRng>(
         let mut permutations: [_; N2] = from_fn(|i| {
             let inputs = from_fn::<_, N, _>(|j| (i >> j) & 1 == 1);
             let mut outputs = inputs;
-            circuit.run_fast(&mut outputs);
+            circuit.run(&mut outputs);
             (inputs, outputs)
         });
 
@@ -493,7 +522,8 @@ fn find_replacement_circuit_fast<R: Send + Sync + RngCore + SeedableRng>(
                 let mut curr_iter = 0;
                 let mut replacement_circuit = None;
 
-                let mut random_circuit = Circuit::new(vec![BaseGate::new(0, 0, [0, 0]); ell_in], N);
+                let mut random_circuit =
+                    Circuit::new(vec![BaseGate::new(0, 0, [0, 0], 0); ell_in], N);
 
                 while curr_iter < max_iterations {
                     if curr_iter % epoch_size == 0 && found.load(Relaxed) {
@@ -1082,6 +1112,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                 index,
                 *old_to_new_map.get(&gate.target()).unwrap(),
                 new_controls,
+                gate.control_func(),
             )
         })
         .collect_vec();
@@ -1123,6 +1154,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                     *latest_id,
                     *new_to_old_map.get(&g.target()).unwrap(),
                     old_controls,
+                    g.control_func(),
                 )
             })
             .collect(),

@@ -17,7 +17,7 @@ pub trait Gate {
     fn id(&self) -> usize;
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound(
     serialize = "D: Serialize, [D; N]: Serialize",
     deserialize = "D: Deserialize<'de>, [D; N]: Deserialize<'de>"
@@ -26,21 +26,24 @@ pub struct BaseGate<const N: usize, D> {
     id: usize,
     target: D,
     controls: [D; N],
-    // control_func: fn(&[D; N], &[bool]) -> bool,
+    control_func: u8,
 }
 
 impl<const N: usize, D> BaseGate<N, D> {
-    pub(crate) fn new(
-        id: usize,
-        target: D,
-        controls: [D; N],
-        // control_func: fn(&[D; N], &[bool]) -> bool,
-    ) -> Self {
+    pub const N_CONTROL_FUNC: u8 = {
+        match N {
+            2 => 16,
+            _ => unimplemented!(),
+        }
+    };
+
+    pub(crate) fn new(id: usize, target: D, controls: [D; N], control_func: u8) -> Self {
+        debug_assert!(control_func < Self::N_CONTROL_FUNC);
         Self {
             id,
             target,
             controls,
-            // control_func,
+            control_func,
         }
     }
 
@@ -65,9 +68,9 @@ impl<const N: usize, D> BaseGate<N, D> {
         self.controls
     }
 
-    // pub(crate) fn control_func(&self) -> &fn(&[D; N], &[bool]) -> bool {
-    //     &self.control_func
-    // }
+    pub(crate) fn control_func(&self) -> u8 {
+        self.control_func
+    }
 }
 
 impl<const N: usize, D> Gate for BaseGate<N, D>
@@ -79,9 +82,46 @@ where
     type Target = D;
 
     fn run(&self, input: &mut Self::Input) {
-        // control bit XOR target
-        input[self.target.into()] = input[self.target.into()]
-            ^ (input[self.controls[0].into()] & input[self.controls[1].into()]);
+        match N {
+            2 => {
+                // Refer to https://i.sstatic.net/tS0my.png for all possible 2-bit input boolean functions
+                const TABLE: [bool; 64] = {
+                    let mut t = [false; 64];
+                    let mut i = 0;
+                    while i < 64 {
+                        let control_func = i >> 2;
+                        let a = (i >> 1) & 1 == 1;
+                        let b = i & 1 == 1;
+                        t[i] = match control_func {
+                            0 => false,
+                            1 => a & b,
+                            2 => a & (!b),
+                            3 => a,
+                            4 => (!a) & b,
+                            5 => b,
+                            6 => a ^ b,
+                            7 => a | b,
+                            8 => !(a | b),
+                            9 => (a & b) | ((!a) & (!b)),
+                            10 => !a,
+                            11 => !b,
+                            12 => (!a) | b,
+                            13 => (!b) | a,
+                            14 => !(a & b),
+                            15 => true,
+                            _ => unreachable!(),
+                        };
+                        i += 1
+                    }
+                    t
+                };
+                let idx = ((self.control_func as usize) << 2)
+                    ^ ((input[self.controls[0].into()] as usize) << 1)
+                    ^ (input[self.controls[1].into()] as usize);
+                input[self.target.into()] ^= TABLE[idx];
+            }
+            _ => unimplemented!(),
+        }
     }
 
     fn controls(&self) -> &Self::Controls {
@@ -101,7 +141,7 @@ where
     }
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Circuit<G> {
     gates: Vec<G>,
     n: usize,
@@ -114,15 +154,6 @@ where
     pub fn run(&self, inputs: &mut [bool]) {
         self.gates.iter().for_each(|g| {
             g.run(inputs);
-        });
-    }
-}
-
-impl Circuit<BaseGate<2, u8>> {
-    pub fn run_fast(&self, inputs: &mut [bool]) {
-        self.gates.iter().for_each(|g| {
-            inputs[g.target() as usize] ^=
-                inputs[g.controls()[0] as usize] & inputs[g.controls()[1] as usize]
         });
     }
 }
