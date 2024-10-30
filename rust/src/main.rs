@@ -13,8 +13,8 @@ fn main() {
     log4rs::init_file("log4rs.yaml", Default::default()).unwrap();
     // env_logger::init();
 
-    let gates = 20;
-    let n = 8;
+    let gates = 200;
+    let n = 128;
     let max_convex_iterations = 10000usize;
     let max_replacement_iterations = 1000000usize;
 
@@ -30,7 +30,7 @@ fn main() {
     ) = prepare_circuit(&original_circuit);
 
     // Inflationary stage
-    let inflationary_stage_steps = 50000;
+    let inflationary_stage_steps = 10000;
     let skeleton_graph = run_local_mixing::<true, _>(
         "Inflationary stage",
         Some(&original_circuit),
@@ -67,7 +67,7 @@ fn main() {
         "############################# Kneading stage starting #############################"
     );
 
-    let kneading_stage_steps = 50000;
+    let kneading_stage_steps = 10000;
     let skeleton_graph = run_local_mixing::<true, _>(
         "Kneading stage",
         Some(&original_circuit),

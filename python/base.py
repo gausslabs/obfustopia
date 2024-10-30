@@ -24,7 +24,7 @@ two_bit_base_controls: dict[int, TwoBitControl] = {
     0: lambda a, b: False,
     1: lambda a, b: a and b,
     2: lambda a, b: a and (not b),
-    3: lambda a, b: a, 
+    3: lambda aa, b: a, 
     4: lambda a, b: (not a) and b,
     5: lambda a, b: b,
     6: lambda a, b: a ^ b,
