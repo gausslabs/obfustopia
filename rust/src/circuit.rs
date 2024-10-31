@@ -351,7 +351,7 @@ impl Circuit<BaseGate<2, u8>> {
         t
     };
 
-    fn sample_mutli_stage_cipher(n: usize, mut rng: impl RngCore) -> Self {
+    pub fn sample_mutli_stage_cipher(n: usize, mut rng: impl RngCore) -> Self {
         let log_n = n.next_power_of_two().ilog2() as usize;
 
         let stages = [true, false, true].map(|is_inflationary| {

@@ -1,11 +1,10 @@
 use petgraph::algo::toposort;
-use rand::{thread_rng, RngCore, SeedableRng};
+use rand::{thread_rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rust::{
     check_probabilisitic_equivalence,
-    circuit::{BaseGate, Circuit, Gate},
-    circuit_to_skeleton_graph, local_mixing_step, node_indices_to_gate_ids, run_local_mixing,
-    sample_circuit_with_base_gate, timed,
+    circuit::{BaseGate, Circuit},
+    circuit_to_skeleton_graph, run_local_mixing,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, env::args};
@@ -23,8 +22,8 @@ fn main() {
     // env_logger::init();
 
     let mut rng = ChaCha8Rng::from_entropy();
-    let gates = 50000;
-    let n = 128;
+    // let gates = 50000;
+    let n = 64;
     let max_convex_iterations = 10000usize;
     let max_replacement_iterations = 1000000usize;
 
@@ -33,8 +32,9 @@ fn main() {
     let mut job = if std::fs::exists(&job_path).unwrap() {
         bincode::deserialize(&std::fs::read(&job_path).unwrap()).unwrap()
     } else {
-        let (original_circuit, _) =
-            sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
+        let original_circuit =
+            // sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
+            Circuit::sample_mutli_stage_cipher(n, thread_rng());
         ObfuscationJob {
             curr_inflationary_stage_steps: 0,
             curr_kneading_stage_steps: 0,
@@ -61,7 +61,7 @@ fn main() {
         skeleton_graph,
         &mut gate_map,
         &mut latest_id,
-        n,
+        n as u8,
         &mut rng,
         2,
         4,
@@ -100,7 +100,7 @@ fn main() {
         skeleton_graph,
         &mut gate_map,
         &mut latest_id,
-        n,
+        n as u8,
         &mut rng,
         4,
         4,

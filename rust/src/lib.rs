@@ -95,51 +95,6 @@ fn input_value_to_bitstring_map(n: usize) -> HashMap<usize, Vec<bool>> {
     return map;
 }
 
-/// Find all paths from curr_node to sink
-fn sink_dfs_with_collision_sets(
-    curr_node: usize,
-    collision_set: &[HashSet<usize>],
-    path: &mut Vec<usize>,
-    chains: &mut Vec<Vec<usize>>,
-) {
-    // if visited.contains(&curr_node) {
-    //     return;
-    // }
-
-    if collision_set[curr_node].is_empty() {
-        path.push(curr_node);
-        chains.push(path.to_vec());
-        path.pop();
-        return;
-    }
-
-    path.push(curr_node);
-    for edge in collision_set[curr_node].iter() {
-        sink_dfs_with_collision_sets(*edge, collision_set, path, chains);
-    }
-    path.pop();
-}
-
-/// Find all dependency chains of the circuit with collision sets `collision_set`
-fn dependency_chains_from_collision_set(collision_set: &[HashSet<usize>]) -> Vec<Vec<usize>> {
-    let mut not_sources = HashSet::new();
-    for set_i in collision_set.iter() {
-        for j in set_i {
-            not_sources.insert(*j);
-        }
-    }
-
-    let mut chains = vec![];
-    let mut path = vec![];
-    for index in 0..collision_set.len() {
-        // Do a DFS iff index is a source
-        if !not_sources.contains(&index) {
-            sink_dfs_with_collision_sets(index, collision_set, &mut path, &mut chains);
-        }
-    }
-    return chains;
-}
-
 fn sample_m_unique_values<const M: usize, D, R: RngCore>(
     rng: &mut R,
     distribution: &Uniform<D>,
