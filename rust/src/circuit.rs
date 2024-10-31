@@ -1,9 +1,9 @@
-use std::{collections::HashMap, fmt::Display};
-
 use bitvec::{array::BitArray, vec::BitVec};
-use itertools::Itertools;
+use itertools::{chain, izip, Itertools};
 use petgraph::{graph::NodeIndex, Graph};
+use rand::{seq::SliceRandom, RngCore};
 use serde::{Deserialize, Serialize};
+use std::{array::from_fn, collections::HashMap, fmt::Display, iter::repeat_with};
 
 pub trait Gate {
     type Input: ?Sized;
@@ -350,6 +350,81 @@ impl Circuit<BaseGate<2, u8>> {
         }
         t
     };
+
+    fn sample_mutli_stage_cipher(n: usize, mut rng: impl RngCore) -> Self {
+        let log_n = n.next_power_of_two().ilog2() as usize;
+
+        let stages = [true, false, true].map(|is_inflationary| {
+            let pi = {
+                let mut indices = (0..n as u8).collect_vec();
+                indices.shuffle(&mut rng);
+                indices
+            };
+
+            let layers = (0..log_n)
+                .map(|l| {
+                    let step = 3usize.pow(l as u32);
+                    let chunk_step = 3 * step;
+                    (0..n)
+                        .step_by(chunk_step)
+                        .flat_map(|offset| {
+                            (offset..)
+                                .take(step)
+                                .map(|i| [i % n, (i + step) % n, (i + step + step) % n])
+                        })
+                        .take((n + 2) / 3)
+                        .collect_vec()
+                })
+                .collect_vec();
+
+            let pi_layers = layers
+                .into_iter()
+                .map(|triplets| {
+                    triplets
+                        .into_iter()
+                        .map(|[i, j, k]| [pi[i], pi[j], pi[k]])
+                        .collect_vec()
+                })
+                .collect_vec();
+
+            if is_inflationary {
+                izip!(
+                    pi_layers.into_iter().flatten(),
+                    Self::INFLATIONARY_GATES.choose_multiple(&mut rng, log_n * ((n + 2) / 3) * 3)
+                )
+                .flat_map(|(triplet, &(m, gates))| {
+                    gates.into_iter().take(m).map(
+                        move |(target, [control0, control1], control_func)| {
+                            (
+                                triplet[target as usize],
+                                [triplet[control0 as usize], triplet[control1 as usize]],
+                                control_func as u8,
+                            )
+                        },
+                    )
+                })
+                .collect_vec()
+            } else {
+                izip!(
+                    pi_layers.into_iter().flatten(),
+                    repeat_with(|| rng.next_u32())
+                        .flat_map(|v| v.to_le_bytes())
+                        .map(|v| v % BaseGate::<2, u8>::N_CONTROL_FUNC)
+                )
+                .map(|(triplet, control_func)| (triplet[0], [triplet[1], triplet[2]], control_func))
+                .collect_vec()
+            }
+        });
+
+        Self::new(
+            izip!(0.., stages.into_iter().flatten())
+                .map(|(id, (target, controls, control_func))| {
+                    BaseGate::new(id, target, controls, control_func)
+                })
+                .collect(),
+            n as _,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -357,6 +432,8 @@ mod test {
     use crate::circuit::{Base2GateControlFunc, BaseGate, Circuit};
     use core::array::from_fn;
     use itertools::{chain, izip, Itertools};
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
     use std::collections::HashSet;
 
     #[test]
@@ -502,5 +579,14 @@ mod test {
             .collect::<HashSet<_>>();
         assert_eq!(table.len(), 144);
         assert!(table.is_subset(&HashSet::from(TABLE)));
+    }
+
+    #[test]
+    fn sample_mutli_stage_cipher() {
+        let mut rng = ChaCha8Rng::from_entropy();
+        let circuit = Circuit::sample_mutli_stage_cipher(64, &mut rng);
+
+        dbg!(circuit.n());
+        dbg!(circuit.gates().len());
     }
 }
