@@ -2060,8 +2060,8 @@ pub fn check_probabilisitic_equivalence<G, R: RngCore>(
     assert_eq!(circuit0.n(), circuit1.n());
     let n = circuit0.n();
 
-    // for value in rng.sample_iter(Uniform::new(0, 1u128 << n - 1)).take(10000) {
-    for value in 0..1u128 << 8 {
+    for value in rng.sample_iter(Uniform::new(0, 1u128 << n)).take(10000) {
+        // for value in 0..1u128 << 8 {
         let mut inputs = vec![];
         for i in 0..n {
             inputs.push((value >> i) & 1u128 == 1);
