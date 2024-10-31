@@ -123,7 +123,7 @@ where
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Circuit<G> {
     gates: Vec<G>,
     n: usize,
