@@ -116,26 +116,6 @@ fn sink_dfs_with_collision_sets(
     path.pop();
 }
 
-/// Find all dependency chains of the circuit with collision sets `collision_set`
-fn dependency_chains_from_collision_set(collision_set: &[HashSet<usize>]) -> Vec<Vec<usize>> {
-    let mut not_sources = HashSet::new();
-    for set_i in collision_set.iter() {
-        for j in set_i {
-            not_sources.insert(*j);
-        }
-    }
-
-    let mut chains = vec![];
-    let mut path = vec![];
-    for index in 0..collision_set.len() {
-        // Do a DFS iff index is a source
-        if !not_sources.contains(&index) {
-            sink_dfs_with_collision_sets(index, collision_set, &mut path, &mut chains);
-        }
-    }
-    return chains;
-}
-
 fn sample_m_unique_values<const M: usize, D, R: RngCore>(
     rng: &mut R,
     distribution: &Uniform<D>,
@@ -1708,7 +1688,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
     {
         let mut new_edges = HashSet::new();
-
+        let mut visited = HashSet::new();
         for imm_pred in all_imm_preds {
             timed!(
                 format!(
@@ -1723,7 +1703,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                     &skeleton_graph,
                     direct_connections,
                     &mut new_edges,
-                    &mut HashSet::new(),
+                    &mut visited,
                     &cout_ids,
                 )
             );
