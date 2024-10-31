@@ -30,7 +30,7 @@ fn main() {
     ) = prepare_circuit(&original_circuit);
 
     // Inflationary stage
-    let inflationary_stage_steps = 10000;
+    let inflationary_stage_steps = 1000;
     let skeleton_graph = run_local_mixing::<true, _>(
         "Inflationary stage",
         Some(&original_circuit),
@@ -67,7 +67,7 @@ fn main() {
         "############################# Kneading stage starting #############################"
     );
 
-    let kneading_stage_steps = 10000;
+    let kneading_stage_steps = 2000;
     let skeleton_graph = run_local_mixing::<true, _>(
         "Kneading stage",
         Some(&original_circuit),

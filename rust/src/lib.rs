@@ -5,8 +5,8 @@ use num_traits::Zero;
 use petgraph::{
     algo::{has_path_connecting, toposort},
     graph::{Node, NodeIndex},
-    visit::{EdgeRef, IntoNodeIdentifiers, IntoNodeReferences},
-    Direction::{self, Outgoing},
+    visit::EdgeRef,
+    Direction::{self},
     Graph,
 };
 use rand::{
@@ -1106,7 +1106,7 @@ fn routine(
 
     #[cfg(feature = "trace")]
     log::trace!(
-        "Direct connections of gatge {:?} = {:?}",
+        "Direct connections of curr gate {:?} = {:?}",
         graph.node_weight(curr_node).unwrap(),
         curr_dc
     );
@@ -1142,9 +1142,24 @@ fn routine(
     //         .retain(|n| !direct_connections.get(gate_id).unwrap().contains(n));
     // }
 
+    #[cfg(feature = "trace")]
+    {
+        let mut to_remove_direct = HashSet::new();
+        let mut to_remove_transitive = HashSet::new();
+        for gate_id in inter.iter() {
+            to_remove_direct.insert(gate_id);
+            for n in direct_connections.get(gate_id).unwrap() {
+                to_remove_transitive.insert(*n);
+            }
+        }
+
+        log::trace!("   DC direct removals: {:?}", to_remove_direct);
+        log::trace!("   DC transitive removals: {:?}", to_remove_transitive);
+    }
+
     for gate_id in inter.iter() {
         cout_gate_pending_dc.remove(gate_id);
-        cout_gate_pending_dc.retain(|n| !direct_connections.get(gate_id).unwrap().contains(n));
+        // cout_gate_pending_dc.retain(|n| !direct_connections.get(gate_id).unwrap().contains(n));
     }
 
     // assert_eq!(cout_gate_pending_dc, cout_gate_pending_dc_clone);
