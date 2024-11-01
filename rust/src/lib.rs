@@ -18,8 +18,8 @@ use rand::{
 use rayon::{
     current_num_threads,
     iter::{
-        IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelBridge,
-        ParallelIterator,
+        IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
+        IntoParallelRefMutIterator, ParallelBridge, ParallelIterator,
     },
     slice::ParallelSliceMut,
 };
@@ -1575,13 +1575,14 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             gate_map.remove(gate_id).unwrap();
             gate_id_to_node_index_map.remove(gate_id).unwrap();
 
-            for (_, set) in direct_connections.iter_mut() {
+            direct_connections.par_iter_mut().for_each(|(_, set)| {
                 set.remove(gate_id);
-            }
-
-            for (_, set) in direct_incoming_connections.iter_mut() {
-                set.remove(gate_id);
-            }
+            });
+            direct_incoming_connections
+                .par_iter_mut()
+                .for_each(|(_, set)| {
+                    set.remove(gate_id);
+                });
         }
     );
 
