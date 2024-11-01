@@ -1385,48 +1385,6 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
     // #### Replace C^out with C^in #### //
 
-    // For each node E in C^in:
-    //     For each successor A of C^out:
-    //         Check whether E collides with A.
-    //             If it does then add the information to direct_connections map
-
-    // For each node E in C^in:
-    //     For each E's successor G:
-    //         remove from E's transitive connections the nodes G is directly connected with
-    //     For each E's transitive connections:
-    //         Add and edge from E to the transitive connection
-
-    // For each node P in the C^out's predecessor:
-    //     For each node E in C^in:
-    //         Check whether E collides with P:
-    //             If it does then
-    //                 - add E to direct connections map of P
-    //                 - add E to transitive connections map of P iff E does not collides with any node with which P collides
-
-    // Update the graph with new transitive edges
-
-    // For each node O in C^out:
-
-    //     function routine(
-    //         Let N be a node
-    //         Let SET be set of nodes
-    //     ):
-    //         if N does not collides with O:
-    //             return
-
-    //         Let inter = dc(N) intersection SET
-    //         remove all elements in inter from SET
-
-    //         for node in inter:
-    //             check N has path to node in SG
-    //                 if not: add edge from N to node
-
-    //         for node in pred(N):
-    //             routine(node, SET)
-
-    //     for node in pred(O):
-    //         call routine(node, dc(node))
-
     // add C^in gates to the graph
     let cin_gates = c_in.gates();
     let cin_nodes = cin_gates
@@ -1440,11 +1398,6 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             node_index
         })
         .collect_vec();
-
-    log::trace!(
-        "C^in gate ids: {:?}",
-        cin_gates.iter().map(|g| g.id()).collect_vec()
-    );
 
     let cout_predecessors = timed!(
         "Find all predecessors",
@@ -1485,18 +1438,26 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         top_sorted_outsiders
     };
 
-    log::trace!(
-        "Top sorted predecessors: {:?}",
-        node_indices_to_gate_ids(top_sorted_predecessors.iter(), skeleton_graph)
-    );
-    log::trace!(
-        "Top sorted successors: {:?}",
-        node_indices_to_gate_ids(top_sorted_successors.iter(), skeleton_graph)
-    );
-    log::trace!(
-        "Top sorted outsiders: {:?}",
-        node_indices_to_gate_ids(top_sorted_outsiders.iter(), skeleton_graph)
-    );
+    #[cfg(feature = "trace")]
+    {
+        log::trace!(
+            "C^in gate ids: {:?}",
+            cin_gates.iter().map(|g| g.id()).collect_vec()
+        );
+
+        log::trace!(
+            "Top sorted predecessors: {:?}",
+            node_indices_to_gate_ids(top_sorted_predecessors.iter(), skeleton_graph)
+        );
+        log::trace!(
+            "Top sorted successors: {:?}",
+            node_indices_to_gate_ids(top_sorted_successors.iter(), skeleton_graph)
+        );
+        log::trace!(
+            "Top sorted outsiders: {:?}",
+            node_indices_to_gate_ids(top_sorted_outsiders.iter(), skeleton_graph)
+        );
+    }
 
     let mut new_edges = HashSet::new();
     let mut remove_edges = HashSet::new();
@@ -1662,12 +1623,9 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         .map(|node| *skeleton_graph.node_weight(*node).unwrap())
         .collect_vec();
 
-    let mut all_imm_preds = HashSet::new();
     let mut union_dir_conns = HashSet::new();
     let mut union_dir_inc_conns = HashSet::new();
-    cout_convex_subset.iter().for_each(|node| {
-        let id = *skeleton_graph.node_weight(*node).unwrap();
-
+    cout_ids.iter().for_each(|id| {
         let mut conns = direct_connections.get(&id).unwrap().clone();
         conns.retain(|v| !cout_ids.contains(v));
         union_dir_conns.extend(conns);
@@ -1675,13 +1633,6 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         let mut inc_conns = direct_incoming_connections.get(&id).unwrap().clone();
         inc_conns.retain(|v| !cout_ids.contains(v));
         union_dir_inc_conns.extend(inc_conns);
-
-        skeleton_graph
-            .neighbors_directed(*node, Direction::Incoming)
-            .filter(|node| !cout_convex_subset.contains(node))
-            .for_each(|im| {
-                all_imm_preds.insert(im);
-            });
     });
 
     // ### Update the graph ###
@@ -1765,66 +1716,37 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     }
 
     {
-        let mut new_edges = HashSet::new();
-        for pred in union_dir_inc_conns {
-            let pred_dcs = direct_connections.get_mut(&pred).unwrap();
-            for succ in union_dir_conns.iter() {
-                if pred_dcs.contains(&succ) {
-                    // check that intersection of DCs of pred and DICs of succ > 0. If not create an edge from pred to succ
-                    let succ_dics = direct_incoming_connections.get(&succ).unwrap();
-                    if (pred_dcs.intersection(succ_dics)).count() == 0 {
-                        new_edges.insert((
-                            *gate_id_to_node_index_map.get(&pred).unwrap(),
-                            *gate_id_to_node_index_map.get(&succ).unwrap(),
-                        ));
+        timed!(
+            "Repairing missing conns from direct preds to direct succs",
+            {
+                let mut new_edges = HashSet::new();
+                for pred in union_dir_inc_conns {
+                    let pred_dcs = direct_connections.get_mut(&pred).unwrap();
+                    for succ in union_dir_conns.iter() {
+                        if pred_dcs.contains(&succ) {
+                            // check that intersection of DCs of pred and DICs of succ > 0. If not create an edge from pred to succ
+                            let succ_dics = direct_incoming_connections.get(&succ).unwrap();
+                            if (pred_dcs.intersection(succ_dics)).count() == 0 {
+                                new_edges.insert((
+                                    *gate_id_to_node_index_map.get(&pred).unwrap(),
+                                    *gate_id_to_node_index_map.get(&succ).unwrap(),
+                                ));
+                            }
+                        }
                     }
                 }
+                #[cfg(feature = "trace")]
+                log::trace!(
+                    "New edges 1: {}",
+                    edges_to_string(&new_edges, &skeleton_graph)
+                );
+
+                for edge in new_edges {
+                    skeleton_graph.add_edge(edge.0, edge.1, Default::default());
+                }
             }
-        }
-        #[cfg(feature = "trace")]
-        log::trace!(
-            "New edges 1: {}",
-            edges_to_string(&new_edges, &skeleton_graph)
-        );
-
-        for edge in new_edges {
-            skeleton_graph.add_edge(edge.0, edge.1, Default::default());
-        }
+        )
     }
-
-    // {
-    //     let mut new_edges = HashSet::new();
-    //     let mut visited = HashSet::new();
-    //     for imm_pred in all_imm_preds {
-    //         timed!(
-    //             format!(
-    //                 "Routine call for imm predecessor {:?}",
-    //                 skeleton_graph.node_weight(imm_pred).unwrap()
-    //             ),
-    //             routine(
-    //                 imm_pred,
-    //                 union_dir_conns.clone(),
-    //                 gate_map,
-    //                 gate_id_to_node_index_map,
-    //                 &skeleton_graph,
-    //                 direct_connections,
-    //                 &mut new_edges,
-    //                 &mut visited,
-    //                 &cout_ids,
-    //             )
-    //         );
-    //     }
-
-    //     #[cfg(feature = "trace")]
-    //     log::trace!(
-    //         "New edges 1: {}",
-    //         edges_to_string(&new_edges, &skeleton_graph)
-    //     );
-
-    //     for edge in new_edges {
-    //         skeleton_graph.add_edge(edge.0, edge.1, Default::default());
-    //     }
-    // }
 
     return true;
 }
