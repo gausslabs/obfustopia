@@ -4,7 +4,7 @@ use rand_chacha::ChaCha8Rng;
 use rust::{
     check_probabilisitic_equivalence,
     circuit::{BaseGate, Circuit},
-    circuit_to_skeleton_graph, run_local_mixing,
+    circuit_to_skeleton_graph, prepare_circuit, run_local_mixing,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -92,20 +92,26 @@ fn main() {
     let original_circuit = job.original_circuit.clone();
     let mut rng = ChaCha8Rng::from_entropy();
 
-    let skeleton_graph = circuit_to_skeleton_graph(&job.curr_circuit);
-    let mut latest_id = 0;
-    let mut gate_map = HashMap::new();
-    job.curr_circuit.gates().iter().for_each(|g| {
-        latest_id = std::cmp::max(latest_id, g.id());
-        gate_map.insert(g.id(), g.clone());
-    });
+    let (
+        mut direct_connections,
+        mut direct_incoming_connections,
+        mut skeleton_graph,
+        mut gate_id_to_node_index_map,
+        mut gate_map,
+        mut graph_neighbours,
+        mut latest_id,
+    ) = prepare_circuit(&original_circuit);
 
     // Inflationary stage
     let skeleton_graph = run_local_mixing::<true, _>(
         "Inflationary stage",
         Some(&original_circuit),
         skeleton_graph,
+        &mut direct_connections,
+        &mut direct_incoming_connections,
         &mut gate_map,
+        &mut gate_id_to_node_index_map,
+        &mut graph_neighbours,
         &mut latest_id,
         job.config.n as u8,
         &mut rng,
@@ -147,7 +153,11 @@ fn main() {
         "Kneading stage",
         Some(&original_circuit),
         skeleton_graph,
+        &mut direct_connections,
+        &mut direct_incoming_connections,
         &mut gate_map,
+        &mut gate_id_to_node_index_map,
+        &mut graph_neighbours,
         &mut latest_id,
         job.config.n as u8,
         &mut rng,
