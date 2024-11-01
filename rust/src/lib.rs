@@ -16,7 +16,10 @@ use rand::{
 };
 use rayon::{
     current_num_threads,
-    iter::{IndexedParallelIterator, IntoParallelIterator, ParallelBridge, ParallelIterator},
+    iter::{
+        IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelBridge,
+        ParallelIterator,
+    },
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,7 +30,7 @@ use std::{
     hash::Hash,
     iter::{self, repeat_with},
     sync::{
-        atomic::{AtomicUsize, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
         Arc, Mutex,
     },
     time::Duration,
@@ -524,6 +527,40 @@ fn find_replacement_circuit_fast<R: Send + Sync + RngCore + SeedableRng>(
     }
 }
 
+fn dfs_fast(
+    graph: &Graph<usize, usize>,
+    sources: Vec<NodeIndex>,
+    direction: Direction,
+) -> HashSet<NodeIndex> {
+    let visited = repeat_with(|| AtomicBool::new(false))
+        .take(graph.node_count())
+        .collect_vec();
+    sources.par_iter().for_each(|s| {
+        visited[s.index()].swap(true, Relaxed);
+    });
+    let stack = Arc::new(Mutex::new(sources));
+
+    (0..current_num_threads()).into_par_iter().for_each(|_| {
+        let mut next = None;
+        while let Some(curr) = next.take().or_else(|| stack.lock().unwrap().pop()) {
+            let mut succs = graph
+                .neighbors_directed(curr, direction)
+                .flat_map(|succ| (!visited[succ.index()].swap(true, Relaxed)).then_some(succ))
+                .collect_vec();
+            next = succs.pop();
+            if !succs.is_empty() {
+                stack.lock().unwrap().extend(succs);
+            }
+        }
+    });
+
+    visited
+        .into_par_iter()
+        .enumerate()
+        .flat_map(|(i, visited)| visited.into_inner().then(|| NodeIndex::from(i as u32)))
+        .collect()
+}
+
 fn dfs(
     curr_node: NodeIndex,
     visited_with_path: &mut HashSet<NodeIndex>,
@@ -1000,17 +1037,25 @@ fn find_all_predecessors(
         }
     }
 
-    let mut predecessors = HashSet::new();
-    for node in imm_predecessors {
-        dfs(
-            node,
-            &mut HashSet::new(),
-            &mut predecessors,
-            &mut vec![],
-            graph,
-            Direction::Incoming,
-        );
-    }
+    let predecessors = dfs_fast(
+        graph,
+        Vec::from_iter(imm_predecessors.clone()),
+        Direction::Incoming,
+    );
+
+    // let mut predecessors_old = HashSet::new();
+    // for node in imm_predecessors {
+    //     dfs(
+    //         node,
+    //         &mut HashSet::new(),
+    //         &mut predecessors_old,
+    //         &mut vec![],
+    //         graph,
+    //         Direction::Incoming,
+    //     );
+    // }
+
+    // assert_eq!(&predecessors_old, &predecessors);
 
     return predecessors;
 }
@@ -1029,17 +1074,25 @@ fn find_all_successors(
         }
     }
 
-    let mut successors = HashSet::new();
-    for node in imm_successors {
-        dfs(
-            node,
-            &mut HashSet::new(),
-            &mut successors,
-            &mut vec![],
-            graph,
-            Direction::Outgoing,
-        );
-    }
+    let successors = dfs_fast(
+        graph,
+        Vec::from_iter(imm_successors.clone()),
+        Direction::Outgoing,
+    );
+
+    // let mut successors_old = HashSet::new();
+    // for node in imm_successors {
+    //     dfs(
+    //         node,
+    //         &mut HashSet::new(),
+    //         &mut successors_old,
+    //         &mut vec![],
+    //         graph,
+    //         Direction::Outgoing,
+    //     );
+    // }
+
+    // assert_eq!(&successors_old, &successors);
 
     return successors;
 }
