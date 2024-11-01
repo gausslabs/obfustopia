@@ -16,13 +16,14 @@ fn main() {
     let gates = 500;
     let n = 64;
     let max_convex_iterations = 10000usize;
-    let max_replacement_iterations = 1000000usize;
+    let max_replacement_iterations = 5000000usize;
 
     let mut rng = ChaCha8Rng::from_entropy();
 
     let (original_circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
     let (
         mut direct_connections,
+        mut direct_incoming_connections,
         mut skeleton_graph,
         mut gate_id_to_node_index_map,
         mut gate_map,
@@ -36,6 +37,7 @@ fn main() {
         Some(&original_circuit),
         skeleton_graph,
         &mut direct_connections,
+        &mut direct_incoming_connections,
         &mut gate_map,
         &mut gate_id_to_node_index_map,
         &mut latest_id,
@@ -73,6 +75,7 @@ fn main() {
         Some(&original_circuit),
         skeleton_graph,
         &mut direct_connections,
+        &mut direct_incoming_connections,
         &mut gate_map,
         &mut gate_id_to_node_index_map,
         &mut latest_id,
