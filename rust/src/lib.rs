@@ -1,6 +1,6 @@
 use circuit::{BaseGate, Circuit, Gate};
 use either::Either::{Left, Right};
-use itertools::{izip, Itertools};
+use itertools::{chain, izip, Itertools};
 use num_traits::Zero;
 use petgraph::{
     algo::{has_path_connecting, toposort},
@@ -20,6 +20,7 @@ use rayon::{
         IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelBridge,
         ParallelIterator,
     },
+    slice::ParallelSliceMut,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -802,11 +803,11 @@ fn graph_level(graph: &Graph<usize, usize>) -> Vec<usize> {
 
 fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
     graph: &Graph<usize, usize>,
+    level: &[usize],
     ell_out: usize,
     max_iterations: usize,
     rng: &mut R,
 ) -> Option<(NodeIndex, HashSet<NodeIndex>)> {
-    let level = graph_level(graph);
     let max_iterations = max_iterations / current_num_threads();
 
     let mut nodes = (0..graph.node_count()).collect_vec();
@@ -1248,9 +1249,11 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 ) -> bool {
     assert!(ell_out <= ell_in);
 
+    let level = graph_level(skeleton_graph);
+
     let (cout_convex_start_node, cout_convex_subset) = timed!(
         "Find convex subcircuit",
-        match find_convex_fast(&skeleton_graph, ell_out, max_convex_iterations, rng) {
+        match find_convex_fast(&skeleton_graph, &level, ell_out, max_convex_iterations, rng) {
             Some((convex_start_node, convex_subset)) => (convex_start_node, convex_subset),
             None => {
                 log::trace!("[returned false] Find convex subscircuit");
@@ -1447,36 +1450,45 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
     assert!(cout_predecessors.is_disjoint(&cout_successors));
 
-    let top_sorted_predecessors = top_sorted_nodes
-        .iter()
-        .filter(|node| cout_predecessors.contains(*node))
-        .collect_vec();
-    let top_sorted_successors = top_sorted_nodes
-        .iter()
-        .filter(|node| cout_successors.contains(node))
-        .collect_vec();
-    let top_sorted_outsiders = top_sorted_nodes
-        .iter()
-        .filter(|node| {
-            // TODO(Jay:) Change cin_nodes to set instead of vec
-            !cin_nodes.contains(&node)
-                && !cout_convex_subset.contains(node)
-                && !cout_successors.contains(node)
-                && !cout_predecessors.contains(node)
-        })
-        .collect_vec();
+    let top_sorted_predecessors = {
+        let mut top_sorted_predecessors = Vec::from_iter(cout_predecessors.iter().copied());
+        top_sorted_predecessors.par_sort_by(|a, b| level[a.index()].cmp(&level[b.index()]));
+        top_sorted_predecessors
+    };
+    let top_sorted_successors = {
+        let mut top_sorted_successorss = Vec::from_iter(cout_successors.iter().copied());
+        top_sorted_successorss.par_sort_by(|a, b| level[a.index()].cmp(&level[b.index()]));
+        top_sorted_successorss
+    };
+    let top_sorted_outsiders = {
+        let insider = HashSet::<_>::from_iter(
+            chain![
+                &cin_nodes,
+                &cout_convex_subset,
+                &cout_successors,
+                &cout_predecessors
+            ]
+            .copied(),
+        );
+        let top_sorted_outsiders = top_sorted_nodes
+            .par_iter()
+            .copied()
+            .filter(|n| !insider.contains(n))
+            .collect::<Vec<_>>();
+        top_sorted_outsiders
+    };
 
     log::trace!(
         "Top sorted predecessors: {:?}",
-        node_indices_to_gate_ids(top_sorted_predecessors.clone().into_iter(), skeleton_graph)
+        node_indices_to_gate_ids(top_sorted_predecessors.iter(), skeleton_graph)
     );
     log::trace!(
         "Top sorted successors: {:?}",
-        node_indices_to_gate_ids(top_sorted_successors.clone().into_iter(), skeleton_graph)
+        node_indices_to_gate_ids(top_sorted_successors.iter(), skeleton_graph)
     );
     log::trace!(
         "Top sorted outsiders: {:?}",
-        node_indices_to_gate_ids(top_sorted_outsiders.clone().into_iter(), skeleton_graph)
+        node_indices_to_gate_ids(top_sorted_outsiders.iter(), skeleton_graph)
     );
 
     let mut new_edges = HashSet::new();
@@ -1498,7 +1510,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
                 for succ in top_sorted_successors.iter() {
                     let succ_gate = gate_map
-                        .get(skeleton_graph.node_weight(**succ).unwrap())
+                        .get(skeleton_graph.node_weight(*succ).unwrap())
                         .unwrap();
 
                     if gate_i.check_collision(succ_gate) {
@@ -1509,7 +1521,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                 // Make all outsiders succerss
                 for out_succ in top_sorted_outsiders.iter() {
                     let out_succ = gate_map
-                        .get(skeleton_graph.node_weight(**out_succ).unwrap())
+                        .get(skeleton_graph.node_weight(*out_succ).unwrap())
                         .unwrap();
 
                     if gate_i.check_collision(out_succ) {
@@ -1549,7 +1561,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
             for pred in top_sorted_predecessors.iter().rev() {
                 let pred_gate = gate_map
-                    .get(skeleton_graph.node_weight(**pred).unwrap())
+                    .get(skeleton_graph.node_weight(*pred).unwrap())
                     .unwrap();
 
                 if pred_gate.check_collision(gate_i) {
@@ -2310,9 +2322,10 @@ mod tests {
         while iter < 1000 {
             let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
             let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+            let level = graph_level(&skeleton_graph);
 
             let convex_subgraph =
-                find_convex_fast(&skeleton_graph, ell_out, max_iterations, &mut rng);
+                find_convex_fast(&skeleton_graph, &level, ell_out, max_iterations, &mut rng);
 
             match convex_subgraph {
                 Some((start_node, convex_subgraph)) => {
@@ -2381,9 +2394,10 @@ mod tests {
         while iter < 100 {
             let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
             let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+            let level = graph_level(&skeleton_graph);
 
             let convex_subgraph =
-                find_convex_fast(&skeleton_graph, ell_out, max_iterations, &mut rng);
+                find_convex_fast(&skeleton_graph, &level, ell_out, max_iterations, &mut rng);
 
             match convex_subgraph {
                 Some((start_node, convex_subgraph)) => {
@@ -2533,6 +2547,7 @@ mod tests {
         let mut rng = ChaCha8Rng::from_entropy();
         let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
         let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+        let level = graph_level(&skeleton_graph);
 
         let mut stats0 = Stats::new();
         let mut stats1 = Stats::new();
@@ -2540,12 +2555,14 @@ mod tests {
         for _ in 0..10 {
             let now = std::time::Instant::now();
             let (_, v0) =
-                find_convex_fast(&skeleton_graph, ell_out, max_iterations, &mut rng).unwrap();
+                find_convex_fast(&skeleton_graph, &level, ell_out, max_iterations, &mut rng)
+                    .unwrap();
             stats0.add_sample(now.elapsed().as_secs_f64());
 
             let now = std::time::Instant::now();
             let (_, v1) =
-                find_convex_fast(&skeleton_graph, ell_out, max_iterations, &mut rng).unwrap();
+                find_convex_fast(&skeleton_graph, &level, ell_out, max_iterations, &mut rng)
+                    .unwrap();
             stats1.add_sample(now.elapsed().as_secs_f64());
 
             let (v0preds, v0succs) = (
@@ -2617,6 +2634,7 @@ mod tests {
             // }
 
             let skeleton_graph = circuit_to_skeleton_graph(&original_circuit);
+            let level = graph_level(&skeleton_graph);
             let top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
             let mut latest_id = 0;
             let mut gate_map = HashMap::new();
@@ -2626,7 +2644,7 @@ mod tests {
             });
 
             let start = std::time::Instant::now();
-            let a = find_convex_fast(&skeleton_graph, ell_out, 10000, rng);
+            let a = find_convex_fast(&skeleton_graph, &level, ell_out, 10000, rng);
             t += start.elapsed();
             c += 1;
             match a {
