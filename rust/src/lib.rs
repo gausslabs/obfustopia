@@ -891,6 +891,7 @@ pub fn prepare_circuit<G: Gate>(
     circuit: &Circuit<G>,
 ) -> (
     HashMap<usize, HashSet<usize>>,
+    HashMap<usize, HashSet<usize>>,
     Graph<usize, usize>,
     HashMap<usize, NodeIndex>,
     HashMap<usize, G>,
@@ -899,7 +900,8 @@ pub fn prepare_circuit<G: Gate>(
 where
     G: Clone,
 {
-    let mut direct_connections = Vec::with_capacity(circuit.gates().len());
+    let mut direct_connections_outgoing = Vec::with_capacity(circuit.gates().len());
+
     for (i, gi) in circuit.gates().iter().enumerate() {
         let mut direct_collisions_i = HashSet::new();
         for (j, gj) in (circuit.gates().iter().enumerate()).skip(i + 1) {
@@ -907,7 +909,18 @@ where
                 direct_collisions_i.insert(j);
             }
         }
-        direct_connections.push(direct_collisions_i);
+        direct_connections_outgoing.push(direct_collisions_i);
+    }
+
+    let mut direct_incoming_connections_map = HashMap::new();
+    for (i, gi) in circuit.gates().iter().enumerate().rev() {
+        let mut direct_incoming_conn_i = HashSet::new();
+        for (j, gj) in (circuit.gates().iter().enumerate().rev()).skip(i + 1) {
+            if gi.check_collision(gj) {
+                direct_incoming_conn_i.insert(j);
+            }
+        }
+        direct_incoming_connections_map.insert(gi.id(), direct_incoming_conn_i);
     }
 
     let mut transitive_connections = Vec::with_capacity(circuit.gates().len());
@@ -916,7 +929,7 @@ where
         // Don't update collision set i in place. Otherwise situations like the following are missed: Let i collide with j < k < l. '
         // If i^th collision set is updated in place then k is removed from the set after checking against j^th collision set. And i^th
         // collision set will never be checked against k. Hence, an incorrect (or say unecessary) dependency will be drawn from i to l.
-        let mut transitive_connections_i = direct_connections[i].clone();
+        let mut transitive_connections_i = direct_connections_outgoing[i].clone();
         // for (j, _) in circuit.gates().iter().enumerate().skip(i + 1) {
         //     if direct_connections[i].contains(&j) {
         //         // remove id k from set of i iff k is in set of j (ie j, where j < k, collides with k)
@@ -924,8 +937,8 @@ where
         //     }
         // }
 
-        for j in direct_connections[i].iter() {
-            transitive_connections_i.retain(|k| !direct_connections[*j].contains(k));
+        for j in direct_connections_outgoing[i].iter() {
+            transitive_connections_i.retain(|k| !direct_connections_outgoing[*j].contains(k));
         }
 
         transitive_connections.push(transitive_connections_i);
@@ -933,7 +946,7 @@ where
 
     // direct connections map
     let mut direct_connections_map = HashMap::new();
-    for (index, connections) in direct_connections.into_iter().enumerate() {
+    for (index, connections) in direct_connections_outgoing.into_iter().enumerate() {
         let conn = HashSet::from_iter(connections.iter().map(|i| circuit.gates()[*i].id()));
         direct_connections_map.insert(circuit.gates()[index].id(), conn);
     }
@@ -972,6 +985,7 @@ where
 
     (
         direct_connections_map,
+        direct_incoming_connections_map,
         skeleton,
         gate_id_to_node_index_map,
         gate_map,
@@ -1232,6 +1246,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     ell_out: usize,
     n: u8,
     direct_connections: &mut HashMap<usize, HashSet<usize>>,
+    direct_incoming_connections: &mut HashMap<usize, HashSet<usize>>,
     gate_map: &mut HashMap<usize, BaseGate<2, u8>>,
     gate_id_to_node_index_map: &mut HashMap<usize, NodeIndex>,
     latest_id: &mut usize,
@@ -1489,6 +1504,11 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     timed!(
         "Process successors", // Successors
         {
+            // create blank entries in direct incoming connections for C^in nodes
+            cin_gates.iter().for_each(|g| {
+                direct_incoming_connections.insert(g.id(), HashSet::new());
+            });
+
             for i in 0..cin_gates.len() {
                 let mut direct_collisions = HashSet::new();
 
@@ -1519,6 +1539,14 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                     if gate_i.check_collision(out_succ) {
                         direct_collisions.insert(out_succ.id());
                     }
+                }
+
+                // update direct incoming connections for each node in direct_collisions
+                for n in direct_collisions.iter() {
+                    direct_incoming_connections
+                        .get_mut(n)
+                        .unwrap()
+                        .insert(gate_i.id());
                 }
 
                 direct_connections.insert(gate_i.id(), direct_collisions);
@@ -1579,6 +1607,10 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                         .get_mut(&pred_gate.id())
                         .unwrap()
                         .insert(gate_i.id());
+                    direct_incoming_connections
+                        .get_mut(&gate_i.id())
+                        .unwrap()
+                        .insert(pred_gate.id());
                     gate_i_pred_collisions.insert(pred_gate.id());
                 }
             }
@@ -1632,12 +1664,17 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
     let mut all_imm_preds = HashSet::new();
     let mut union_dir_conns = HashSet::new();
+    let mut union_dir_inc_conns = HashSet::new();
     cout_convex_subset.iter().for_each(|node| {
         let id = *skeleton_graph.node_weight(*node).unwrap();
 
         let mut conns = direct_connections.get(&id).unwrap().clone();
         conns.retain(|v| !cout_ids.contains(v));
         union_dir_conns.extend(conns);
+
+        let mut inc_conns = direct_incoming_connections.get(&id).unwrap().clone();
+        inc_conns.retain(|v| !cout_ids.contains(v));
+        union_dir_inc_conns.extend(inc_conns);
 
         skeleton_graph
             .neighbors_directed(*node, Direction::Incoming)
@@ -1706,10 +1743,15 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         "Deleting C^out auxilary data", // delete C^out
         for (gate_id) in cout_ids.iter() {
             direct_connections.remove(gate_id).unwrap();
+            direct_incoming_connections.remove(gate_id).unwrap();
             gate_map.remove(gate_id).unwrap();
             gate_id_to_node_index_map.remove(gate_id).unwrap();
 
             for (_, set) in direct_connections.iter_mut() {
+                set.remove(gate_id);
+            }
+
+            for (_, set) in direct_incoming_connections.iter_mut() {
                 set.remove(gate_id);
             }
         }
@@ -1724,27 +1766,21 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
     {
         let mut new_edges = HashSet::new();
-        let mut visited = HashSet::new();
-        for imm_pred in all_imm_preds {
-            timed!(
-                format!(
-                    "Routine call for imm predecessor {:?}",
-                    skeleton_graph.node_weight(imm_pred).unwrap()
-                ),
-                routine(
-                    imm_pred,
-                    union_dir_conns.clone(),
-                    gate_map,
-                    gate_id_to_node_index_map,
-                    &skeleton_graph,
-                    direct_connections,
-                    &mut new_edges,
-                    &mut visited,
-                    &cout_ids,
-                )
-            );
+        for pred in union_dir_inc_conns {
+            let pred_dcs = direct_connections.get_mut(&pred).unwrap();
+            for succ in union_dir_conns.iter() {
+                if pred_dcs.contains(&succ) {
+                    // check that intersection of DCs of pred and DICs of succ > 0. If not create an edge from pred to succ
+                    let succ_dics = direct_incoming_connections.get(&succ).unwrap();
+                    if (pred_dcs.intersection(succ_dics)).count() == 0 {
+                        new_edges.insert((
+                            *gate_id_to_node_index_map.get(&pred).unwrap(),
+                            *gate_id_to_node_index_map.get(&succ).unwrap(),
+                        ));
+                    }
+                }
+            }
         }
-
         #[cfg(feature = "trace")]
         log::trace!(
             "New edges 1: {}",
@@ -1756,6 +1792,40 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         }
     }
 
+    // {
+    //     let mut new_edges = HashSet::new();
+    //     let mut visited = HashSet::new();
+    //     for imm_pred in all_imm_preds {
+    //         timed!(
+    //             format!(
+    //                 "Routine call for imm predecessor {:?}",
+    //                 skeleton_graph.node_weight(imm_pred).unwrap()
+    //             ),
+    //             routine(
+    //                 imm_pred,
+    //                 union_dir_conns.clone(),
+    //                 gate_map,
+    //                 gate_id_to_node_index_map,
+    //                 &skeleton_graph,
+    //                 direct_connections,
+    //                 &mut new_edges,
+    //                 &mut visited,
+    //                 &cout_ids,
+    //             )
+    //         );
+    //     }
+
+    //     #[cfg(feature = "trace")]
+    //     log::trace!(
+    //         "New edges 1: {}",
+    //         edges_to_string(&new_edges, &skeleton_graph)
+    //     );
+
+    //     for edge in new_edges {
+    //         skeleton_graph.add_edge(edge.0, edge.1, Default::default());
+    //     }
+    // }
+
     return true;
 }
 
@@ -1764,6 +1834,7 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
     original_circuit: Option<&Circuit<BaseGate<2, u8>>>,
     mut skeleton_graph: Graph<usize, usize>,
     direct_connections: &mut HashMap<usize, HashSet<usize>>,
+    direct_incoming_connections: &mut HashMap<usize, HashSet<usize>>,
     gate_map: &mut HashMap<usize, BaseGate<2, u8>>,
     gate_id_to_node_index_map: &mut HashMap<usize, NodeIndex>,
     latest_id: &mut usize,
@@ -1807,6 +1878,7 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
             ell_out,
             n,
             direct_connections,
+            direct_incoming_connections,
             gate_map,
             gate_id_to_node_index_map,
             latest_id,
@@ -1925,6 +1997,7 @@ mod tests {
 
         let (
             mut direct_connections,
+            mut direct_incoming_connections,
             mut skeleton_graph,
             mut gate_id_to_node_index_map,
             mut gate_map,
@@ -1955,6 +2028,7 @@ mod tests {
                 ell_out,
                 n,
                 &mut direct_connections,
+                &mut direct_incoming_connections,
                 &mut gate_map,
                 &mut gate_id_to_node_index_map,
                 &mut latest_id,
