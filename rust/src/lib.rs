@@ -1096,58 +1096,51 @@ fn routine(
         // .filter(|id| !cout_ids.contains(id))
         .cloned()
         .collect_vec();
-    for gate_id in inter.iter() {
-        assert!(!cout_ids.contains(gate_id));
-        match gate_id_to_node_index_map.get(gate_id) {
-            Some(gate_node_index) => {
-                // assert!(!cout_convex_subset.contains(gate_node_index));
-                if !has_path_connecting(graph, curr_node, *gate_node_index, None) {
-                    new_edges.insert((curr_node, *gate_node_index));
+
+    timed!(
+        format!(
+            "   Process gates at intersection; Intersection size: {}",
+            inter.len()
+        ),
+        for gate_id in inter.iter() {
+            assert!(!cout_ids.contains(gate_id));
+            match gate_id_to_node_index_map.get(gate_id) {
+                Some(gate_node_index) => {
+                    // assert!(!cout_convex_subset.contains(gate_node_index));
+                    if !has_path_connecting(graph, curr_node, *gate_node_index, None) {
+                        new_edges.insert((curr_node, *gate_node_index));
+                    }
+                }
+                None => {
+                    log::trace!("GateID {gate_id} does not exists");
                 }
             }
-            None => {
-                log::trace!("GateID {gate_id} does not exists");
-            }
         }
-    }
+    );
 
     #[cfg(feature = "trace")]
     log::trace!("Intersection of collision: {:?}", &inter);
 
-    // let mut cout_gate_pending_dc_clone = cout_gate_pending_dc.clone();
-    // // remove intersection and direction connectinos of nodes in intersection
-    // for gate_id in curr_dc.iter() {
-    //     cout_gate_pending_dc_clone.remove(gate_id);
-    //     cout_gate_pending_dc_clone
-    //         .retain(|n| !direct_connections.get(gate_id).unwrap().contains(n));
+    // #[cfg(feature = "trace")]
+    // {
+    //     let mut to_remove_direct = HashSet::new();
+    //     let mut to_remove_transitive = HashSet::new();
+    //     for gate_id in inter.iter() {
+    //         to_remove_direct.insert(gate_id);
+    //         for n in direct_connections.get(gate_id).unwrap() {
+    //             to_remove_transitive.insert(*n);
+    //         }
+    //     }
+
+    //     log::trace!("   DC direct removals: {:?}", to_remove_direct);
+    //     log::trace!("   DC transitive removals: {:?}", to_remove_transitive);
     // }
 
-    #[cfg(feature = "trace")]
-    {
-        let mut to_remove_direct = HashSet::new();
-        let mut to_remove_transitive = HashSet::new();
-        for gate_id in inter.iter() {
-            to_remove_direct.insert(gate_id);
-            for n in direct_connections.get(gate_id).unwrap() {
-                to_remove_transitive.insert(*n);
-            }
-        }
-
-        log::trace!("   DC direct removals: {:?}", to_remove_direct);
-        log::trace!("   DC transitive removals: {:?}", to_remove_transitive);
-    }
-
+    // remove the intersection
     for gate_id in inter.iter() {
         cout_gate_pending_dc.remove(gate_id);
         // cout_gate_pending_dc.retain(|n| !direct_connections.get(gate_id).unwrap().contains(n));
     }
-
-    // assert_eq!(cout_gate_pending_dc, cout_gate_pending_dc_clone);
-
-    // remove the intersection
-
-    // log::trace!("Way inside: {:?}", cout_gate_pending_dc);
-    // }
 
     for pred in graph.neighbors_directed(curr_node, Direction::Incoming) {
         routine(
@@ -1286,8 +1279,6 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         }
     );
 
-    let collision_sets_c_in = circuit_to_collision_sets(&c_in_dash);
-
     let c_in = Circuit::new(
         c_in_dash
             .gates()
@@ -1317,6 +1308,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         log::trace!("@@@@ C^out @@@@ {}", &c_out);
         log::trace!("@@@@ C^in' @@@@ {}", &c_in_dash);
         // log::trace!("@@@@ C^in @@@@ {}", &c_in);
+        let collision_sets_c_in = circuit_to_collision_sets(&c_in_dash);
         log::trace!("C^in collision sets: {:?}", &collision_sets_c_in);
     }
 
@@ -1568,28 +1560,10 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         }
     });
 
-    // collect immediate predecessors and ids of nodes in C^out before graph update
     let cout_ids = cout_convex_subset
         .iter()
         .map(|node| *skeleton_graph.node_weight(*node).unwrap())
         .collect_vec();
-    // let cout_ids_and_immpreds = cout_convex_subset
-    //     .iter()
-    //     .map(|node| {
-    //         let id = *skeleton_graph.node_weight(*node).unwrap();
-    //         let mut conns = direct_connections.get(&id).unwrap().clone();
-    //         conns.retain(|v| !cout_ids.contains(v));
-    //         (
-    //             id,
-    //             skeleton_graph
-    //                 .neighbors_directed(*node, Direction::Incoming)
-    //                 .filter(|node| !cout_convex_subset.contains(node))
-    //                 .collect_vec(),
-    //             gate_map.get(&id).unwrap().clone(),
-    //             conns,
-    //         )
-    //     })
-    //     .collect_vec();
 
     let mut all_imm_preds = HashSet::new();
     let mut union_dir_conns = HashSet::new();
@@ -1608,7 +1582,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             });
     });
 
-    // update the graph //
+    // ### Update the graph ###
 
     #[cfg(feature = "trace")]
     {
@@ -1619,10 +1593,6 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                 direct_connections.get(&id).unwrap()
             );
         }
-    }
-
-    #[cfg(feature = "trace")]
-    {
         log::trace!(
             "New edges 0: {}",
             edges_to_string(&new_edges, &skeleton_graph)
@@ -1632,6 +1602,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             edges_to_string(&remove_edges, &skeleton_graph)
         );
     }
+
     // Remove edges
     for edge in remove_edges {
         let mut e = skeleton_graph
@@ -1709,42 +1680,6 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             );
         }
 
-        // for (gate_id, predecessors, gate, direct_collisions) in cout_ids_and_immpreds.iter() {
-        //     // let mut direct_collisions = direct_connections.get(gate_id).unwrap().clone();
-        //     // for id in cout_ids.iter() {
-        //     //     direct_collisions.remove(id);
-        //     // }
-
-        //     #[cfg(feature = "trace")]
-        //     log::trace!(
-        //         "Imm predecessors of C^out gate {gate_id} = {:?}; dc = {:?}",
-        //         node_indices_to_gate_ids(predecessors.iter(), skeleton_graph),
-        //         &direct_collisions
-        //     );
-
-        //     // let gate = gate_map.get(gate_id).unwrap();
-        //     for pred in predecessors {
-        //         timed!(
-        //             format!(
-        //                 "Routine call for C^out gate {gate_id} for predecessor {:?}",
-        //                 skeleton_graph.node_weight(*pred).unwrap()
-        //             ),
-        //             routine(
-        //                 *pred,
-        //                 direct_collisions.clone(),
-        //                 gate,
-        //                 gate_map,
-        //                 &gate_id_to_node_index_map,
-        //                 &skeleton_graph,
-        //                 &direct_connections,
-        //                 &mut new_edges,
-        //                 &mut HashSet::new(),
-        //                 &cout_ids,
-        //             )
-        //         );
-        //     }
-        // }
-
         #[cfg(feature = "trace")]
         log::trace!(
             "New edges 1: {}",
@@ -1755,192 +1690,6 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             skeleton_graph.add_edge(edge.0, edge.1, Default::default());
         }
     }
-
-    // // Find all predecessors and successors of subgrpah C^out
-    // let mut c_out_imm_predecessors = HashSet::new();
-    // let mut c_out_imm_successors = HashSet::new();
-    // // First find all immediate predecessors and successors
-    // for node in cout_convex_subset.iter() {
-    //     for pred in skeleton_graph.neighbors_directed(node.clone(), Direction::Incoming) {
-    //         if !cout_convex_subset.contains(&pred) {
-    //             c_out_imm_predecessors.insert(pred);
-    //         }
-    //     }
-    //     for succ in skeleton_graph.neighbors_directed(node.clone(), Direction::Outgoing) {
-    //         if !cout_convex_subset.contains(&succ) {
-    //             c_out_imm_successors.insert(succ);
-    //         }
-    //     }
-    // }
-
-    // // Add C^in nodes to the graph
-    // let c_in_nodes = c_in
-    //     .gates()
-    //     .iter()
-    //     .map(|g| {
-    //         let node = skeleton_graph.add_node(g.id());
-    //         gate_map.insert(g.id(), g.clone());
-    //         node
-    //     })
-    //     .collect_vec();
-
-    // let mut new_edges = HashSet::new();
-    // for (i, set_i) in collision_sets_c_in.iter().enumerate() {
-    //     for j in set_i {
-    //         new_edges.insert((c_in_nodes[i], c_in_nodes[*j]));
-    //     }
-    // }
-
-    // #[cfg(feature = "trace")]
-    // log::trace!(
-    //     "C^in gates: {:?}",
-    //     node_indices_to_gate_ids(c_in_nodes.iter(), &skeleton_graph)
-    // );
-
-    // let mut predecessors = HashSet::new();
-    // let mut successors = HashSet::new();
-
-    // let (new_edges_preds, new_edges_succs) = rayon::join(
-    //     || {
-    //         // Find all predecessors of C^out and find necessary edges upon collision
-    //         timed!("Find C^out's predecessors and find necessary edges", {
-    //             let mut path = vec![];
-    //             for node in c_out_imm_predecessors.iter() {
-    //                 dfs(
-    //                     *node,
-    //                     &mut HashSet::new(),
-    //                     &mut predecessors,
-    //                     &mut path,
-    //                     &skeleton_graph,
-    //                     Direction::Incoming,
-    //                 );
-    //             }
-
-    //             let mut new_edges = HashSet::new();
-    //             for node in predecessors.iter() {
-    //                 let node_gate = gate_map
-    //                     .get(skeleton_graph.node_weight(*node).unwrap())
-    //                     .unwrap();
-    //                 let colliding_indices =
-    //                     c_in.gates().iter().enumerate().filter_map(|(index, gate)| {
-    //                         if node_gate.check_collision(gate) {
-    //                             Some(c_in_nodes[index])
-    //                         } else {
-    //                             None
-    //                         }
-    //                     });
-    //                 colliding_indices.for_each(|target_node| {
-    //                     new_edges.insert((*node, target_node));
-    //                 });
-    //             }
-
-    //             new_edges
-    //         })
-    //     },
-    //     || {
-    //         timed!("Find C^out's successors and find necessary edges", {
-    //             // Find all successors of C^out find add necessary edges
-    //             let mut path = vec![];
-    //             for node in c_out_imm_successors.iter() {
-    //                 dfs(
-    //                     *node,
-    //                     &mut HashSet::new(),
-    //                     &mut successors,
-    //                     &mut path,
-    //                     &skeleton_graph,
-    //                     Direction::Outgoing,
-    //                 );
-    //             }
-
-    //             let mut new_edges = HashSet::new();
-    //             for node in successors.iter() {
-    //                 let node_gate = gate_map
-    //                     .get(skeleton_graph.node_weight(*node).unwrap())
-    //                     .unwrap();
-    //                 let colliding_indices =
-    //                     c_in.gates().iter().enumerate().filter_map(|(index, gate)| {
-    //                         if node_gate.check_collision(gate) {
-    //                             Some(c_in_nodes[index])
-    //                         } else {
-    //                             None
-    //                         }
-    //                     });
-    //                 colliding_indices.for_each(|source_node| {
-    //                     new_edges.insert((source_node, *node));
-    //                 });
-    //             }
-    //             new_edges
-    //         })
-    //     },
-    // );
-    // new_edges.extend(new_edges_preds);
-    // new_edges.extend(new_edges_succs);
-
-    // log::trace!(
-    //     "   Predecessors count: {}; Successors count: {}",
-    //     predecessors.len(),
-    //     successors.len()
-    // );
-
-    // let mut cin_convex_subset = HashSet::new();
-    // c_in_nodes.iter().for_each(|n| {
-    //     cin_convex_subset.insert(*n);
-    // });
-
-    // let mut outsiders = HashSet::new();
-
-    // timed!("Find outsiders", {
-    //     for node in skeleton_graph.node_indices() {
-    //         if !successors.contains(&node)
-    //             && !predecessors.contains(&node)
-    //             && cout_convex_subset.contains(&node)
-    //             && cin_convex_subset.contains(&node)
-    //         {
-    //             outsiders.insert(node);
-    //         }
-    //     }
-    // });
-
-    // log::trace!("No. of outsiders: {}", outsiders.len());
-
-    // // Add edges from outsiders to colliding gates in C^in
-    // timed!(
-    //     "Find new edges for outsiders",
-    //     for node in outsiders.iter() {
-    //         let node_gate = gate_map
-    //             .get(skeleton_graph.node_weight(*node).unwrap())
-    //             .unwrap();
-    //         let colliding_indices = c_in.gates().iter().enumerate().filter_map(|(index, gate)| {
-    //             if node_gate.check_collision(gate) {
-    //                 Some(c_in_nodes[index])
-    //             } else {
-    //                 None
-    //             }
-    //         });
-    //         colliding_indices.for_each(|target_node| {
-    //             new_edges.insert((*node, target_node));
-    //         });
-    //     }
-    // );
-
-    // timed!(
-    //     "Add all new edges to the graph",
-    //     for edge in new_edges {
-    //         skeleton_graph.add_edge(edge.0, edge.1, Default::default());
-    //     }
-    // );
-
-    // // Index of removed node is take over by the node that has the last index. Here we remove \ell^out nodes.
-    // // As long as \ell^out <= \ell^in (notice that C^in gates are added before removing gates of C^out) none of
-    // // pre-existing nodes we replace the removed node and hence we wouldn't incorrectly delete some node.
-    // timed!(
-    //     "Remove C^out from the graph",
-    //     for node in cout_convex_subset {
-    //         gate_map
-    //             .remove(&skeleton_graph.remove_node(node).unwrap())
-    //             .unwrap();
-    //     }
-    // );
 
     return true;
 }
