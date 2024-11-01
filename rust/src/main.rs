@@ -66,20 +66,28 @@ fn main() {
     // env_logger::init();
 
     let job_path = args().nth(1).expect("Job path");
+    let orignal_circuit_path = args().nth(2).expect("Original path");
 
     let mut job = if std::fs::exists(&job_path).unwrap() {
         ObfuscationJob::load(&job_path)
     } else {
         let config = ObfuscationConfig {
             n: 64,
-            inflationary_stage_steps: 50000,
-            kneading_stage_steps: 50000,
+            inflationary_stage_steps: 1000,
+            kneading_stage_steps: 2000,
             max_convex_iterations: 10000,
             max_replacement_iterations: 1000000,
         };
         let original_circuit =
             // sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
             Circuit::sample_mutli_stage_cipher(config.n, thread_rng());
+
+        std::fs::write(
+            &orignal_circuit_path,
+            bincode::serialize(&original_circuit).unwrap(),
+        )
+        .unwrap();
+
         ObfuscationJob {
             config,
             curr_inflationary_stage_steps: 0,

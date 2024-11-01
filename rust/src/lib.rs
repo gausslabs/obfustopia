@@ -838,8 +838,9 @@ fn update_graph_neighbors(
     in_degree.resize_with(graph.node_count(), Default::default);
     let in_degree_slice = UnsafeSlice::new(in_degree);
     incoming.into_par_iter().for_each(|n| unsafe {
-        in_degree_slice.update(n.index(), |[incoming, _]| {
-            *incoming = graph.neighbors_directed(n, Direction::Incoming).collect()
+        in_degree_slice.update(n.index(), |[incoming, outgoing]| {
+            *incoming = graph.neighbors_directed(n, Direction::Incoming).collect();
+            *outgoing = graph.neighbors_directed(n, Direction::Outgoing).collect()
         })
     });
 }
@@ -1277,9 +1278,16 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
     // #### Replace C^out with C^in #### //
 
+    // Find all predecessors and successors of subgrpah C^out
+    let mut c_out_imm_predecessors = HashSet::new();
     let mut c_out_imm_successors = HashSet::new();
     // First find all immediate predecessors and successors
     for node in cout_convex_subset.iter() {
+        for pred in skeleton_graph.neighbors_directed(node.clone(), Direction::Incoming) {
+            if !cout_convex_subset.contains(&pred) {
+                c_out_imm_predecessors.insert(pred);
+            }
+        }
         for succ in skeleton_graph.neighbors_directed(node.clone(), Direction::Outgoing) {
             if !cout_convex_subset.contains(&succ) {
                 c_out_imm_successors.insert(succ);
@@ -1623,6 +1631,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                     skeleton_graph.node_weight(edge.1).unwrap(),
                 );
 
+                real_removed_edge_targets.insert(e.source());
                 real_removed_edge_targets.insert(e.target());
 
                 skeleton_graph.remove_edge(e.id());
@@ -1651,14 +1660,53 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         chain![
             cout_convex_subset.iter().copied(),
             cin_nodes.iter().take(ell_in - ell_out).copied(),
-            c_out_imm_successors,
-            new_edges.iter().map(|e| e.1),
-            real_removed_edge_targets,
+            c_out_imm_predecessors.iter().copied(),
+            c_out_imm_successors.iter().copied(),
+            new_edges
+                .iter()
+                .flat_map(|e| [e.0, e.1])
+                .filter(|target| target.index() < skeleton_graph.node_count()),
+            real_removed_edge_targets.iter().copied(),
         ]
         .collect(),
     );
 
-    assert_eq!(graph_neighbors, &crate::graph_neighbors(skeleton_graph));
+    let iii = izip!(
+        0..,
+        graph_neighbors,
+        &crate::graph_neighbors(skeleton_graph)
+    )
+    .filter_map(|(idx, a, b)| (a != b).then_some(idx))
+    .collect_vec();
+    if !iii.is_empty() {
+        println!("diff: {iii:?}");
+        println!(
+            "cout_convex_subset: {:?}",
+            cout_convex_subset.iter().copied().collect_vec()
+        );
+        println!(
+            "cin_nodes: {:?}",
+            cin_nodes
+                .iter()
+                .take(ell_in - ell_out)
+                .copied()
+                .collect_vec()
+        );
+        println!("c_out_imm_successors: {:?}", c_out_imm_successors);
+        println!(
+            "new_edges targets: {:?}",
+            new_edges
+                .iter()
+                .map(|e| e.1)
+                .filter(|target| target.index() < skeleton_graph.node_count())
+                .collect_vec()
+        );
+        println!(
+            "real_removed_edge_targets: {:?}",
+            real_removed_edge_targets.iter().copied(),
+        );
+        panic!("");
+    }
 
     // update gate_id to node_index map
     for node in skeleton_graph.node_indices() {
