@@ -16,7 +16,10 @@ use rand::{
 };
 use rayon::{
     current_num_threads,
-    iter::{IndexedParallelIterator, IntoParallelIterator, ParallelBridge, ParallelIterator},
+    iter::{
+        IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelBridge,
+        ParallelIterator,
+    },
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1467,7 +1470,6 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         }
     );
 
-
     // Predecessors
     timed!("Process predecessors", {
         // Handle direction connections from predecessors to gates in C^in
@@ -1655,22 +1657,29 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         timed!(
             "Repairing missing conns from direct preds to direct succs",
             {
-                let mut new_edges = HashSet::new();
-                for pred in union_dir_inc_conns {
-                    let pred_dcs = direct_connections.get_mut(&pred).unwrap();
-                    for succ in union_dir_conns.iter() {
-                        if pred_dcs.contains(&succ) {
-                            // check that intersection of DCs of pred and DICs of succ > 0. If not create an edge from pred to succ
-                            let succ_dics = direct_incoming_connections.get(&succ).unwrap();
-                            if (pred_dcs.intersection(succ_dics)).count() == 0 {
-                                new_edges.insert((
-                                    *gate_id_to_node_index_map.get(&pred).unwrap(),
-                                    *gate_id_to_node_index_map.get(&succ).unwrap(),
-                                ));
+                let new_edges = union_dir_inc_conns
+                    .par_iter()
+                    .map(|pred| {
+                        let mut edges = HashSet::new();
+                        let pred_dcs = direct_connections.get(pred).unwrap();
+                        for succ in union_dir_conns.iter() {
+                            if pred_dcs.contains(succ) {
+                                // check that intersection of DCs of pred and DICs of succ > 0. If not create an edge from pred to succ
+                                let succ_dics = direct_incoming_connections.get(succ).unwrap();
+                                if pred_dcs.is_disjoint(succ_dics) {
+                                    edges.insert((
+                                        *gate_id_to_node_index_map.get(pred).unwrap(),
+                                        *gate_id_to_node_index_map.get(succ).unwrap(),
+                                    ));
+                                }
                             }
                         }
-                    }
-                }
+                        edges
+                    })
+                    .reduce(HashSet::new, |mut acc, item| {
+                        acc.extend(item);
+                        acc
+                    });
                 #[cfg(feature = "trace")]
                 log::trace!(
                     "New edges 1: {}",
@@ -1799,8 +1808,8 @@ pub fn check_probabilisitic_equivalence<G, R: RngCore>(
     assert_eq!(circuit0.n(), circuit1.n());
     let n = circuit0.n();
 
-    for value in rng.sample_iter(Uniform::new(0, 1u128 << n)).take(10000) {
-        // for value in 0..1u128 << 8 {
+    // for value in rng.sample_iter(Uniform::new(0, 1u128 << n)).take(10000) {
+    for value in 0..1u128 << 16 {
         let mut inputs = vec![];
         for i in 0..n {
             inputs.push((value >> i) & 1u128 == 1);
