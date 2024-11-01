@@ -73,14 +73,15 @@ fn main() {
     } else {
         let config = ObfuscationConfig {
             n: 64,
-            inflationary_stage_steps: 100,
-            kneading_stage_steps: 200,
+            inflationary_stage_steps: 1000,
+            kneading_stage_steps: 2000,
             max_convex_iterations: 10000,
             max_replacement_iterations: 1000000,
         };
         let (original_circuit, _) =
-            sample_circuit_with_base_gate::<2, u8, _>(200, 64, 1.0, &mut thread_rng());
+            sample_circuit_with_base_gate::<2, u8, _>(1200, 64, 1.0, &mut thread_rng());
         // Circuit::sample_mutli_stage_cipher(config.n, thread_rng());
+        // let original_circuit = Circuit::sample_mutli_stage_cipher(config.n, thread_rng());
 
         std::fs::write(
             &orignal_circuit_path,

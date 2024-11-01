@@ -166,7 +166,7 @@ where
             controls[0] = iter.next().unwrap();
             controls[1] = iter.next().unwrap();
             let control_func = rng.next_u64() as u8 % BaseGate::<MAX_K, D>::N_CONTROL_FUNC;
-            let control_func = 1;
+            // let control_func = 1;
 
             // sample_trace.update(format!("TWO{target}{}{}", controls[0], controls[1],));
 
@@ -271,8 +271,8 @@ pub fn sample_circuit_with_base_gate_fast<R: Rng>(
                 break (v >> 4);
             }
         });
-        // let control_func = rng.next().unwrap() % BaseGate::<2, u8>::N_CONTROL_FUNC;
-        let control_func = 1;
+        let control_func = rng.next().unwrap() % BaseGate::<2, u8>::N_CONTROL_FUNC;
+        // let control_func = 1;
         *gate = BaseGate::<2, u8>::new(id, t, [c0, c1], control_func);
     });
 }
