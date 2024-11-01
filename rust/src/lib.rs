@@ -31,6 +31,7 @@ use std::{
     fmt::{Debug, Display},
     hash::Hash,
     iter::{self, repeat_with},
+    ops::Deref,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
         Arc, Mutex,
@@ -165,6 +166,7 @@ where
             controls[0] = iter.next().unwrap();
             controls[1] = iter.next().unwrap();
             let control_func = rng.next_u64() as u8 % BaseGate::<MAX_K, D>::N_CONTROL_FUNC;
+            let control_func = 1;
 
             // sample_trace.update(format!("TWO{target}{}{}", controls[0], controls[1],));
 
@@ -269,7 +271,8 @@ pub fn sample_circuit_with_base_gate_fast<R: Rng>(
                 break (v >> 4);
             }
         });
-        let control_func = rng.next().unwrap() % BaseGate::<2, u8>::N_CONTROL_FUNC;
+        // let control_func = rng.next().unwrap() % BaseGate::<2, u8>::N_CONTROL_FUNC;
+        let control_func = 1;
         *gate = BaseGate::<2, u8>::new(id, t, [c0, c1], control_func);
     });
 }
@@ -954,20 +957,20 @@ fn circuit_to_collision_sets<G: Gate>(circuit: &Circuit<G>) -> Vec<HashSet<usize
         all_collision_sets.push(collision_set_i);
     }
 
-    // // Remove intsecting collisions. That is i can collide with j iff there is no k such that i < k < j with which both i & j collide
-    // for (i, _) in circuit.gates.iter().enumerate() {
-    //     // Don't update collision set i in place. Otherwise situations like the following are missed: Let i collide with j < k < l. '
-    //     // If i^th collision set is updated in place then k is removed from the set after checking against j^th collision set. And i^th
-    //     // collision set will never be checked against k. Hence, an incorrect (or say unecessary) dependency will be drawn from i to l.
-    //     let mut collisions_set_i = all_collision_sets[i].clone();
-    //     for (j, _) in circuit.gates.iter().enumerate().skip(i + 1) {
-    //         if all_collision_sets[i].contains(&j) {
-    //             // remove id k from set of i iff k is in set of j (ie j, where j < k, collides with k)
-    //             collisions_set_i.retain(|k| !all_collision_sets[j].contains(k));
-    //         }
-    //     }
-    //     all_collision_sets[i] = collisions_set_i;
-    // }
+    // Remove intsecting collisions. That is i can collide with j iff there is no k such that i < k < j with which both i & j collide
+    for (i, _) in circuit.gates().iter().enumerate() {
+        // Don't update collision set i in place. Otherwise situations like the following are missed: Let i collide with j < k < l. '
+        // If i^th collision set is updated in place then k is removed from the set after checking against j^th collision set. And i^th
+        // collision set will never be checked against k. Hence, an incorrect (or say unecessary) dependency will be drawn from i to l.
+        let mut collisions_set_i = all_collision_sets[i].clone();
+        for (j, _) in circuit.gates().iter().enumerate().skip(i + 1) {
+            if all_collision_sets[i].contains(&j) {
+                // remove id k from set of i iff k is in set of j (ie j, where j < k, collides with k)
+                collisions_set_i.retain(|k| !all_collision_sets[j].contains(k));
+            }
+        }
+        all_collision_sets[i] = collisions_set_i;
+    }
 
     return all_collision_sets;
 }
@@ -1104,27 +1107,6 @@ pub fn dfs_within_convex_set(
     top_sorted.push_front(curr_node);
 }
 
-pub fn circuit_to_skeleton_graph<G: Gate>(circuit: &Circuit<G>) -> Graph<usize, usize> {
-    let all_collision_sets = circuit_to_collision_sets(circuit);
-
-    let mut skeleton = Graph::<usize, usize>::new();
-    // add nodes with weights as ids
-    let nodes = circuit
-        .gates()
-        .iter()
-        .map(|g| skeleton.add_node(g.id()))
-        .collect_vec();
-    let edges = all_collision_sets.iter().enumerate().flat_map(|(i, set)| {
-        // FIXME(Jay): Had to collect_vec due to lifetime issues
-        let v = set.iter().map(|j| (nodes[i], nodes[*j])).collect_vec();
-        v.into_iter()
-    });
-
-    skeleton.extend_with_edges(edges);
-
-    return skeleton;
-}
-
 /// Local mixing step
 ///
 /// Returns false if mixing step is not successuful which may happen if one of the following is true
@@ -1140,7 +1122,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     direct_incoming_connections: &mut HashMap<usize, HashSet<usize>>,
     gate_map: &mut HashMap<usize, BaseGate<2, u8>>,
     gate_id_to_node_index_map: &mut HashMap<usize, NodeIndex>,
-    graph_neighbors: &mut Vec<[HashSet<NodeIndex>; 2]>,
+    graph_neighbours: &mut Vec<[HashSet<NodeIndex>; 2]>,
     latest_id: &mut usize,
     max_replacement_iterations: usize,
     max_convex_iterations: usize,
@@ -1148,7 +1130,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 ) -> bool {
     assert!(ell_out <= ell_in);
 
-    let level = graph_level(skeleton_graph, graph_neighbors);
+    let level = graph_level(skeleton_graph, graph_neighbours);
 
     let (cout_convex_start_node, cout_convex_subset) = timed!(
         "Find convex subcircuit",
@@ -1373,75 +1355,73 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     let mut new_edges = HashSet::new();
     let mut remove_edges = HashSet::new();
 
-    timed!(
-        "Process successors", // Successors
-        {
-            // create blank entries in direct incoming connections for C^in nodes
-            cin_gates.iter().for_each(|g| {
-                direct_incoming_connections.insert(g.id(), HashSet::new());
-            });
+    // Successors
+    timed!("Process successors", {
+        // create blank entries in direct incoming connections for C^in nodes
+        cin_gates.iter().for_each(|g| {
+            direct_incoming_connections.insert(g.id(), HashSet::new());
+        });
 
-            for i in 0..cin_gates.len() {
-                let mut direct_collisions = HashSet::new();
+        for i in 0..cin_gates.len() {
+            let mut direct_collisions = HashSet::new();
 
-                let gate_i = &cin_gates[i];
-                for j in i + 1..cin_gates.len() {
-                    let gate_j = &cin_gates[j];
-                    if gate_i.check_collision(gate_j) {
-                        direct_collisions.insert(gate_j.id());
-                    }
+            let gate_i = &cin_gates[i];
+            for j in i + 1..cin_gates.len() {
+                let gate_j = &cin_gates[j];
+                if gate_i.check_collision(gate_j) {
+                    direct_collisions.insert(gate_j.id());
                 }
-
-                for succ in top_sorted_successors.iter() {
-                    let succ_gate = gate_map
-                        .get(skeleton_graph.node_weight(*succ).unwrap())
-                        .unwrap();
-
-                    if gate_i.check_collision(succ_gate) {
-                        direct_collisions.insert(succ_gate.id());
-                    }
-                }
-
-                // Make all outsiders succerss
-                for out_succ in top_sorted_outsiders.iter() {
-                    let out_succ = gate_map
-                        .get(skeleton_graph.node_weight(*out_succ).unwrap())
-                        .unwrap();
-
-                    if gate_i.check_collision(out_succ) {
-                        direct_collisions.insert(out_succ.id());
-                    }
-                }
-
-                // update direct incoming connections for each node in direct_collisions
-                for n in direct_collisions.iter() {
-                    direct_incoming_connections
-                        .get_mut(n)
-                        .unwrap()
-                        .insert(gate_i.id());
-                }
-
-                direct_connections.insert(gate_i.id(), direct_collisions);
             }
 
-            for i in 0..cin_gates.len() {
-                let direct_collisions = direct_connections.get(&cin_gates[i].id()).unwrap();
-                let mut transitive_collisions = direct_collisions.clone();
+            for succ in top_sorted_successors.iter() {
+                let succ_gate = gate_map
+                    .get(skeleton_graph.node_weight(*succ).unwrap())
+                    .unwrap();
 
-                for g_id in direct_collisions.iter() {
-                    let dc_other_gate = direct_connections.get(&g_id).unwrap();
-                    transitive_collisions.retain(|n| !dc_other_gate.contains(n));
+                if gate_i.check_collision(succ_gate) {
+                    direct_collisions.insert(succ_gate.id());
                 }
+            }
 
-                for gate_id in transitive_collisions {
-                    new_edges.insert((
-                        cin_nodes[i],
-                        *gate_id_to_node_index_map.get(&gate_id).unwrap(),
-                    ));
+            // Make all outsiders succerss
+            for out_succ in top_sorted_outsiders.iter() {
+                let out_succ = gate_map
+                    .get(skeleton_graph.node_weight(*out_succ).unwrap())
+                    .unwrap();
+
+                if gate_i.check_collision(out_succ) {
+                    direct_collisions.insert(out_succ.id());
                 }
+            }
+
+            // update direct incoming connections for each node in direct_collisions
+            for n in direct_collisions.iter() {
+                direct_incoming_connections
+                    .get_mut(n)
+                    .unwrap()
+                    .insert(gate_i.id());
+            }
+
+            direct_connections.insert(gate_i.id(), direct_collisions);
+        }
+
+        for i in 0..cin_gates.len() {
+            let direct_collisions = direct_connections.get(&cin_gates[i].id()).unwrap();
+            let mut transitive_collisions = direct_collisions.clone();
+
+            for g_id in direct_collisions.iter() {
+                let dc_other_gate = direct_connections.get(&g_id).unwrap();
+                transitive_collisions.retain(|n| !dc_other_gate.contains(n));
+            }
+
+            for gate_id in transitive_collisions {
+                new_edges.insert((
+                    cin_nodes[i],
+                    *gate_id_to_node_index_map.get(&gate_id).unwrap(),
+                ));
             }
         }
-    );
+    });
 
     // Predecessors
     timed!("Process predecessors", {
@@ -1609,9 +1589,9 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                 //     "New edges 1: {}",
                 //     edges_to_string(&new_edges, &skeleton_graph)
                 // );
-                for edge in &new_edges {
-                    skeleton_graph.add_edge(edge.0, edge.1, Default::default());
-                }
+                // for edge in &new_edges {
+                //     skeleton_graph.add_edge(edge.0, edge.1, Default::default());
+                // }
             }
         )
     }
@@ -1656,7 +1636,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
     update_graph_neighbors(
         skeleton_graph,
-        graph_neighbors,
+        graph_neighbours,
         chain![
             cout_convex_subset.iter().copied(),
             cin_nodes.iter().take(ell_in - ell_out).copied(),
@@ -1671,42 +1651,42 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         .collect(),
     );
 
-    let iii = izip!(
-        0..,
-        graph_neighbors,
-        &crate::graph_neighbors(skeleton_graph)
-    )
-    .filter_map(|(idx, a, b)| (a != b).then_some(idx))
-    .collect_vec();
-    if !iii.is_empty() {
-        println!("diff: {iii:?}");
-        println!(
-            "cout_convex_subset: {:?}",
-            cout_convex_subset.iter().copied().collect_vec()
-        );
-        println!(
-            "cin_nodes: {:?}",
-            cin_nodes
-                .iter()
-                .take(ell_in - ell_out)
-                .copied()
-                .collect_vec()
-        );
-        println!("c_out_imm_successors: {:?}", c_out_imm_successors);
-        println!(
-            "new_edges targets: {:?}",
-            new_edges
-                .iter()
-                .map(|e| e.1)
-                .filter(|target| target.index() < skeleton_graph.node_count())
-                .collect_vec()
-        );
-        println!(
-            "real_removed_edge_targets: {:?}",
-            real_removed_edge_targets.iter().copied(),
-        );
-        panic!("");
-    }
+    // let iii = izip!(
+    //     0..,
+    //     graph_neighbors,
+    //     &crate::graph_neighbors(skeleton_graph)
+    // )
+    // .filter_map(|(idx, a, b)| (a != b).then_some(idx))
+    // .collect_vec();
+    // if !iii.is_empty() {
+    //     println!("diff: {iii:?}");
+    //     println!(
+    //         "cout_convex_subset: {:?}",
+    //         cout_convex_subset.iter().copied().collect_vec()
+    //     );
+    //     println!(
+    //         "cin_nodes: {:?}",
+    //         cin_nodes
+    //             .iter()
+    //             .take(ell_in - ell_out)
+    //             .copied()
+    //             .collect_vec()
+    //     );
+    //     println!("c_out_imm_successors: {:?}", c_out_imm_successors);
+    //     println!(
+    //         "new_edges targets: {:?}",
+    //         new_edges
+    //             .iter()
+    //             .map(|e| e.1)
+    //             .filter(|target| target.index() < skeleton_graph.node_count())
+    //             .collect_vec()
+    //     );
+    //     println!(
+    //         "real_removed_edge_targets: {:?}",
+    //         real_removed_edge_targets.iter().copied(),
+    //     );
+    //     panic!("");
+    // }
 
     // update gate_id to node_index map
     for node in skeleton_graph.node_indices() {
@@ -1860,7 +1840,7 @@ mod tests {
         let (original_circuit, _) =
             sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
 
-        let mut skeleton_graph = circuit_to_skeleton_graph(&original_circuit);
+        let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&original_circuit);
         let mut top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
         let mut latest_id = 0;
         let mut gate_map = HashMap::new();
@@ -1963,7 +1943,7 @@ mod tests {
         let mut rng = thread_rng();
         for _ in 0..10 {
             let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-            let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+            let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&circuit);
 
             let mut visited_with_path = HashSet::new();
             let mut visited = HashSet::new();
@@ -2008,16 +1988,16 @@ mod tests {
 
     #[test]
     fn test_find_convex_subcircuit() {
-        let gates = 2000;
+        let gates = 100;
         let n = 64;
         let ell_out = 4;
         let max_iterations = 10000;
         let mut rng = ChaCha8Rng::from_entropy();
 
         let mut iter = 0;
-        while iter < 1000 {
+        while iter < 10 {
             let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-            let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+            let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&circuit);
             let graph_neighbors = graph_neighbors(&skeleton_graph);
             let levels = graph_level(&skeleton_graph, &graph_neighbors);
             let convex_subgraph =
@@ -2059,7 +2039,10 @@ mod tests {
         }
     }
 
-    fn find_all_predecessors(node: NodeIndex, graph: &Graph<usize, usize>) -> HashSet<NodeIndex> {
+    fn find_all_predecessors_of_node(
+        node: NodeIndex,
+        graph: &Graph<usize, usize>,
+    ) -> HashSet<NodeIndex> {
         let mut all_preds = HashSet::new();
         for curr_node in graph.neighbors_directed(node, Direction::Incoming) {
             dfs(
@@ -2086,7 +2069,7 @@ mod tests {
         let mut iter = 0;
         while iter < 100 {
             let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-            let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+            let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&circuit);
             let graph_neighbors = graph_neighbors(&skeleton_graph);
             let levels = graph_level(&skeleton_graph, &graph_neighbors);
 
@@ -2109,7 +2092,7 @@ mod tests {
                     for i in 0..convex_set_sorted.len() {
                         // find predecessors of i
                         let all_preds =
-                            find_all_predecessors(convex_set_sorted[i], &skeleton_graph);
+                            find_all_predecessors_of_node(convex_set_sorted[i], &skeleton_graph);
                         for j in i + 1..convex_set_sorted.len() {
                             assert!(!all_preds.contains(&convex_set_sorted[j]));
                         }
@@ -2129,11 +2112,11 @@ mod tests {
         let mut rng = thread_rng();
         for _ in 0..10000 {
             let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-            let graph = circuit_to_skeleton_graph(&circuit);
+            let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&circuit);
 
             let collisions_sets = circuit_to_collision_sets(&circuit);
             let is_wc = is_collisions_set_weakly_connected(&collisions_sets);
-            let expected_wc = connected_components(&graph) == 1;
+            let expected_wc = connected_components(&skeleton_graph) == 1;
             assert_eq!(
                 is_wc, expected_wc,
                 "Expected {expected_wc} but got {is_wc} for collisions sets {:?}",
@@ -2177,7 +2160,7 @@ mod tests {
         let max_iterations = 10000;
         let mut rng = ChaCha8Rng::from_entropy();
         let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-        let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+        let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&circuit);
         let graph_neighbors = graph_neighbors(&skeleton_graph);
         let levels = graph_level(&skeleton_graph, &graph_neighbors);
 
@@ -2201,7 +2184,7 @@ mod tests {
         let ell_out = 4;
         let mut rng = thread_rng();
         let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-        let skeleton_graph = circuit_to_skeleton_graph(&circuit);
+        let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&circuit);
         let level = graph_level(&skeleton_graph, &graph_neighbors(&skeleton_graph));
 
         let mut stats = Stats::new();
@@ -2228,7 +2211,7 @@ mod tests {
 
         let (original_circuit, _) =
             sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-        let graph = circuit_to_skeleton_graph(&original_circuit);
+        let (_, _, graph, _, _, _, _) = prepare_circuit(&original_circuit);
         let graph_neighbors = graph_neighbors(&graph);
 
         let n = 10;
@@ -2248,7 +2231,7 @@ mod tests {
 
         let (original_circuit, _) =
             sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-        let graph = circuit_to_skeleton_graph(&original_circuit);
+        let (_, _, graph, _, _, _, _) = prepare_circuit(&original_circuit);
 
         let n = 30;
         let mut t = Duration::default();

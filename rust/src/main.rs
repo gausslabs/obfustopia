@@ -4,7 +4,7 @@ use rand_chacha::ChaCha8Rng;
 use rust::{
     check_probabilisitic_equivalence,
     circuit::{BaseGate, Circuit},
-    circuit_to_skeleton_graph, prepare_circuit, run_local_mixing,
+    prepare_circuit, run_local_mixing, sample_circuit_with_base_gate,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -73,14 +73,14 @@ fn main() {
     } else {
         let config = ObfuscationConfig {
             n: 64,
-            inflationary_stage_steps: 1000,
-            kneading_stage_steps: 2000,
+            inflationary_stage_steps: 100,
+            kneading_stage_steps: 200,
             max_convex_iterations: 10000,
             max_replacement_iterations: 1000000,
         };
-        let original_circuit =
-            // sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-            Circuit::sample_mutli_stage_cipher(config.n, thread_rng());
+        let (original_circuit, _) =
+            sample_circuit_with_base_gate::<2, u8, _>(200, 64, 1.0, &mut thread_rng());
+        // Circuit::sample_mutli_stage_cipher(config.n, thread_rng());
 
         std::fs::write(
             &orignal_circuit_path,
