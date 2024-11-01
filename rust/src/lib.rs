@@ -18,8 +18,8 @@ use rand::{
 use rayon::{
     current_num_threads,
     iter::{
-        IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelBridge,
-        ParallelIterator,
+        IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
+        IntoParallelRefMutIterator, ParallelBridge, ParallelIterator,
     },
     slice::ParallelSliceMut,
 };
@@ -1555,13 +1555,14 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             gate_map.remove(gate_id).unwrap();
             gate_id_to_node_index_map.remove(gate_id).unwrap();
 
-            for (_, set) in direct_connections.iter_mut() {
+            direct_connections.par_iter_mut().for_each(|(_, set)| {
                 set.remove(gate_id);
-            }
-
-            for (_, set) in direct_incoming_connections.iter_mut() {
-                set.remove(gate_id);
-            }
+            });
+            direct_incoming_connections
+                .par_iter_mut()
+                .for_each(|(_, set)| {
+                    set.remove(gate_id);
+                });
         }
     );
 
@@ -1569,21 +1570,57 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         timed!(
             "Repairing missing conns from direct preds to direct succs",
             {
-                for pred in union_dir_inc_conns {
-                    let pred_dcs = direct_connections.get_mut(&pred).unwrap();
-                    for succ in union_dir_conns.iter() {
-                        if pred_dcs.contains(&succ) {
-                            // check that intersection of DCs of pred and DICs of succ > 0. If not create an edge from pred to succ
-                            let succ_dics = direct_incoming_connections.get(&succ).unwrap();
-                            if (pred_dcs.intersection(succ_dics)).count() == 0 {
-                                new_edges.insert((
-                                    *gate_id_to_node_index_map.get(&pred).unwrap(),
-                                    *gate_id_to_node_index_map.get(&succ).unwrap(),
-                                ));
+                let missing_new_edges = union_dir_inc_conns
+                    .par_iter()
+                    .map(|pred| {
+                        let mut edges = HashSet::new();
+                        let pred_dcs = direct_connections.get(pred).unwrap();
+                        for succ in union_dir_conns.iter() {
+                            if pred_dcs.contains(succ) {
+                                // check that intersection of DCs of pred and DICs of succ > 0. If not create an edge from pred to succ
+                                let succ_dics = direct_incoming_connections.get(succ).unwrap();
+                                if pred_dcs.is_disjoint(succ_dics) {
+                                    edges.insert((
+                                        *gate_id_to_node_index_map.get(pred).unwrap(),
+                                        *gate_id_to_node_index_map.get(succ).unwrap(),
+                                    ));
+                                }
                             }
                         }
-                    }
+                        edges
+                    })
+                    .reduce(HashSet::new, |mut acc, item| {
+                        acc.extend(item);
+                        acc
+                    });
+
+                #[cfg(feature = "trace")]
+                {
+                    let missing_new_edges_old = {
+                        let mut new_edges_old = HashSet::new();
+                        for pred in &union_dir_inc_conns {
+                            let pred_dcs = direct_connections.get_mut(pred).unwrap();
+                            for succ in union_dir_conns.iter() {
+                                if pred_dcs.contains(succ) {
+                                    // check that intersection of DCs of pred and DICs of succ > 0. If not create an edge from pred to succ
+                                    let succ_dics = direct_incoming_connections.get(succ).unwrap();
+                                    if (pred_dcs.intersection(succ_dics)).count() == 0 {
+                                        new_edges_old.insert((
+                                            *gate_id_to_node_index_map.get(pred).unwrap(),
+                                            *gate_id_to_node_index_map.get(succ).unwrap(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        new_edges_old
+                    };
+
+                    assert_eq!(&missing_new_edges_old, &missing_new_edges);
                 }
+
+                new_edges.extend(missing_new_edges);
+
                 // #[cfg(feature = "trace")]
                 // log::trace!(
                 //     "New edges 1: {}",
