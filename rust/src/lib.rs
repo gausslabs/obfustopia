@@ -1,6 +1,7 @@
 use circuit::{BaseGate, Circuit, Gate};
 use either::Either::{Left, Right};
 use itertools::{izip, Itertools};
+use log4rs::append::rolling_file::policy::compound::trigger;
 use num_traits::Zero;
 use petgraph::{
     algo::{has_path_connecting, toposort},
@@ -576,7 +577,8 @@ fn dfs2(
         return true;
     }
 
-    if visited.contains(&curr_node) || level[curr_node.index()] >= max_level {
+    // || level[curr_node.index()] >= max_level
+    if visited.contains(&curr_node) {
         return true;
     }
 
@@ -1782,7 +1784,19 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
                             &gate_map,
                             original_circuit.n(),
                         );
-                        check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, rng);
+                        let (correct, diff_indices) = check_probabilisitic_equivalence(
+                            &original_circuit,
+                            &mixed_circuit,
+                            rng,
+                        );
+
+                        if !correct {
+                            println!(
+                                "[Error] Failed at {stage_name} step {mixing_steps}. Different at indices {:?}",
+                                diff_indices
+                            );
+                            assert!(false);
+                        }
                     }
                     Err(_) => {
                         log::error!("Cycle detected!");
@@ -1802,7 +1816,8 @@ pub fn check_probabilisitic_equivalence<G, R: RngCore>(
     circuit0: &Circuit<G>,
     circuit1: &Circuit<G>,
     rng: &mut R,
-) where
+) -> (bool, Vec<usize>)
+where
     G: Gate<Input = [bool]>,
 {
     assert_eq!(circuit0.n(), circuit1.n());
@@ -1830,10 +1845,15 @@ pub fn check_probabilisitic_equivalence<G, R: RngCore>(
                         diff_indices.push(index);
                     }
                 });
+
+            return (false, diff_indices);
+            // assert!(false);
         }
 
-        assert_eq!(inputs0, inputs1, "Different at indices {:?}", diff_indices);
+        // assert_eq!(inputs0, inputs1, "Different at indices {:?}", diff_indices);
     }
+
+    return (true, vec![]);
 }
 
 #[cfg(test)]
