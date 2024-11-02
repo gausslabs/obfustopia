@@ -30,6 +30,7 @@ use std::{
     fmt::{Debug, Display},
     hash::Hash,
     iter::{self, repeat_with},
+    ops::Deref,
     sync::{
         atomic::{AtomicUsize, Ordering::Relaxed},
         Arc, Mutex,
@@ -854,6 +855,45 @@ fn circuit_to_collision_sets<G: Gate>(circuit: &Circuit<G>) -> Vec<HashSet<usize
     return all_collision_sets;
 }
 
+fn direct_connections_from_top_sorted_gates(
+    top_sorted: &[usize],
+    gate_map: &HashMap<usize, BaseGate<2, u8>>,
+) -> (
+    HashMap<usize, HashSet<usize>>,
+    HashMap<usize, HashSet<usize>>,
+) {
+    let mut direct_connections_outgoing = HashMap::new();
+
+    for (i, gate_i_id) in top_sorted.iter().enumerate() {
+        let gate_i = gate_map.get(&gate_i_id).unwrap();
+
+        let mut direct_collisions_i = HashSet::new();
+        for (j, gate_j_id) in (top_sorted.iter().enumerate()).skip(i + 1) {
+            let gate_j = gate_map.get(&gate_j_id).unwrap();
+            if gate_i.check_collision(gate_j) {
+                direct_collisions_i.insert(*gate_j_id);
+            }
+        }
+        direct_connections_outgoing.insert(*gate_i_id, direct_collisions_i);
+    }
+
+    let mut direct_connections_incoming = HashMap::new();
+    for (i, gate_i_id) in top_sorted.iter().enumerate().rev() {
+        let gate_i = gate_map.get(&gate_i_id).unwrap();
+
+        let mut direct_incoming_conn_i = HashSet::new();
+        for (j, gate_j_id) in (top_sorted.iter().enumerate().rev()).skip(top_sorted.len() - i) {
+            let gate_j = gate_map.get(&gate_j_id).unwrap();
+            if gate_i.check_collision(gate_j) {
+                direct_incoming_conn_i.insert(*gate_j_id);
+            }
+        }
+        direct_connections_incoming.insert(*gate_i_id, direct_incoming_conn_i);
+    }
+
+    return (direct_connections_outgoing, direct_connections_incoming);
+}
+
 pub fn prepare_circuit<G: Gate>(
     circuit: &Circuit<G>,
 ) -> (
@@ -882,9 +922,9 @@ where
     let mut direct_incoming_connections_map = HashMap::new();
     for (i, gi) in circuit.gates().iter().enumerate().rev() {
         let mut direct_incoming_conn_i = HashSet::new();
-        for (j, gj) in (circuit.gates().iter().enumerate().rev()).skip(i + 1) {
+        for (j, gj) in (circuit.gates().iter().enumerate().rev()).skip(circuit.gates().len() - i) {
             if gi.check_collision(gj) {
-                direct_incoming_conn_i.insert(j);
+                direct_incoming_conn_i.insert(gj.id());
             }
         }
         direct_incoming_connections_map.insert(gi.id(), direct_incoming_conn_i);
@@ -1234,10 +1274,16 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         .map(|node_index| skeleton_graph.node_weight(*node_index).unwrap());
 
     #[cfg(feature = "trace")]
-    log::trace!(
-        "Convex subset gate ids: {:?}",
-        &convex_subgraph_top_sorted_gate_ids.clone().collect_vec()
-    );
+    {
+        log::trace!(
+            "Convex subset gate ids: {:?}",
+            &convex_subgraph_top_sorted_gate_ids.clone().collect_vec()
+        );
+
+        for node in cout_convex_subset.iter() {
+            assert!(convex_subset_top_sorted.contains(node));
+        }
+    }
 
     let convex_subgraph_gates =
         convex_subgraph_top_sorted_gate_ids.map(|node| gate_map.get(node).unwrap());
@@ -1693,6 +1739,26 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                 }
             }
         )
+    }
+
+    {
+        let top_sorted_nodes = toposort(skeleton_graph.deref(), None).unwrap();
+        let top_sorted_gate_ids = top_sorted_nodes
+            .iter()
+            .map(|node| skeleton_graph.node_weight(*node).unwrap())
+            .copied()
+            .collect_vec();
+        let (test_direct_outgoing_connections, test_direct_incoming_connections) =
+            direct_connections_from_top_sorted_gates(&top_sorted_gate_ids, gate_map);
+
+        assert_eq!(
+            direct_connections.deref(),
+            &test_direct_outgoing_connections
+        );
+        assert_eq!(
+            direct_incoming_connections.deref(),
+            &test_direct_incoming_connections
+        );
     }
 
     return true;
@@ -2504,5 +2570,15 @@ mod tests {
             graph_level(&graph);
         }
         dbg!(start.elapsed() / n);
+    }
+
+    #[test]
+    fn trial() {
+        for i in (0..10).rev() {
+            // println!("{i}");
+            for j in ((0..10).rev()).skip(10 - i) {
+                println!("{i} {j}");
+            }
+        }
     }
 }
