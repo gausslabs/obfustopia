@@ -1004,9 +1004,9 @@ where
     let mut direct_incoming_connections_map = HashMap::new();
     for (i, gi) in circuit.gates().iter().enumerate().rev() {
         let mut direct_incoming_conn_i = HashSet::new();
-        for (j, gj) in (circuit.gates().iter().enumerate().rev()).skip(i + 1) {
+        for (j, gj) in (circuit.gates().iter().enumerate().rev()).skip(circuit.gates().len() - i) {
             if gi.check_collision(gj) {
-                direct_incoming_conn_i.insert(j);
+                direct_incoming_conn_i.insert(gj.id());
             }
         }
         direct_incoming_connections_map.insert(gi.id(), direct_incoming_conn_i);
@@ -1690,7 +1690,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
     // let iii = izip!(
     //     0..,
-    //     graph_neighbors,
+    //     graph_neighbours,
     //     &crate::graph_neighbors(skeleton_graph)
     // )
     // .filter_map(|(idx, a, b)| (a != b).then_some(idx))
@@ -1797,6 +1797,11 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
                 );
                 match top_sort_res {
                     Result::Ok(top_sorted_nodes) => {
+                        log::trace!(
+                            "Top sort after local mixing: {:?}",
+                            node_indices_to_gate_ids(top_sorted_nodes.iter(), &skeleton_graph)
+                        );
+
                         let mixed_circuit = Circuit::from_top_sorted_nodes(
                             &top_sorted_nodes,
                             &skeleton_graph,
@@ -1829,7 +1834,7 @@ pub fn check_probabilisitic_equivalence<G, R: RngCore>(
     let n = circuit0.n();
 
     for value in rng.sample_iter(Uniform::new(0, 1u128 << n - 1)).take(10000) {
-        // for value in 0..1u128 << 15 {
+        // for value in 0..1u128 << 16 {
         let mut inputs = vec![];
         for i in 0..n {
             inputs.push((value >> i) & 1u128 == 1);
@@ -2305,4 +2310,24 @@ mod tests {
             )
         }
     }
+
+    // #[test]
+    // fn perm_trial() {
+    //     let gate_count = 300;
+    //     let n = 16u8;
+    //     // let (circuit, _) =
+    //     // sample_circuit_with_base_gate::<2, _, _>(gate_count, n, 1.0, &mut thread_rng());
+    //     let mut circuit =
+    //         Circuit::new(vec![BaseGate::new(0, 0, [0, 0], 0); gate_count], n as usize);
+    //     sample_circuit_with_base_gate_fast(&mut circuit, n, &mut thread_rng());
+
+    //     let bitstring = input_value_to_bitstring_map(n as usize);
+    //     let mapp = permutation_map(&circuit, &bitstring);
+
+    //     for i in 0..100 {
+    //         let mapp2 = permutation_map(&circuit, &bitstring);
+
+    //         assert_eq!(&mapp, &mapp2);
+    //     }
+    // }
 }
