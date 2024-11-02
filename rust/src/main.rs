@@ -150,7 +150,17 @@ fn main() {
             &gate_map,
             job.config.n as _,
         );
-        check_probabilisitic_equivalence(&job.curr_circuit, &original_circuit, &mut rng);
+
+        let (is_correct, diff_indices) =
+            check_probabilisitic_equivalence(&job.curr_circuit, &original_circuit, &mut rng);
+        if !is_correct {
+            println!(
+                "[Error] Failed at end of kneading stage. Different at indices {:?}",
+                diff_indices
+            );
+            assert!(false);
+        }
+
         job.store(&job_path);
     }
 
@@ -196,7 +206,17 @@ fn main() {
             &gate_map,
             job.config.n as _,
         );
-        check_probabilisitic_equivalence(&job.curr_circuit, &original_circuit, &mut rng);
+
+        let (is_correct, diff_indices) =
+            check_probabilisitic_equivalence(&job.curr_circuit, &original_circuit, &mut rng);
+        if !is_correct {
+            println!(
+                "[Error] Failed at end of kneading stage. Different at indices {:?}",
+                diff_indices
+            );
+            assert!(false);
+        }
+
         job.store(&job_path);
     }
 }

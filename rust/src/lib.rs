@@ -1808,7 +1808,20 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
                             &gate_map,
                             original_circuit.n(),
                         );
-                        check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, rng);
+
+                        let (is_correct, diff_indices) = check_probabilisitic_equivalence(
+                            &original_circuit,
+                            &mixed_circuit,
+                            rng,
+                        );
+                        if !is_correct {
+                            println!(
+                                "[Error] Failed at {stage_name} step {mixing_steps}. Different at indices {:?}",
+                                diff_indices
+                            );
+                            assert!(false);
+                        }
+
                         cb(mixing_steps, mixed_circuit);
                     }
                     Err(_) => {
@@ -1827,7 +1840,8 @@ pub fn check_probabilisitic_equivalence<G, R: RngCore>(
     circuit0: &Circuit<G>,
     circuit1: &Circuit<G>,
     rng: &mut R,
-) where
+) -> (bool, Vec<usize>)
+where
     G: Gate<Input = [bool]>,
 {
     assert_eq!(circuit0.n(), circuit1.n());
@@ -1855,10 +1869,14 @@ pub fn check_probabilisitic_equivalence<G, R: RngCore>(
                         diff_indices.push(index);
                     }
                 });
+
+            return (false, diff_indices);
         }
 
-        assert_eq!(inputs0, inputs1, "Different at indices {:?}", diff_indices);
+        // assert_eq!(inputs0, inputs1, "Different at indices {:?}", diff_indices);
     }
+
+    return (true, vec![]);
 }
 
 #[cfg(test)]
