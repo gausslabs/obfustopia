@@ -1426,86 +1426,171 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     // Predecessors
     timed!("Process predecessors", {
         // Handle direction connections from predecessors to gates in C^in
-        let mut transitive_connections_to_remove = HashSet::new();
-        let mut transitive_connections_to_add = vec![HashSet::new(); cin_gates.len()];
-        for (i, gate_i) in cin_gates.iter().enumerate() {
-            let mut gate_i_pred_collisions = HashSet::new();
 
-            for pred in top_sorted_predecessors.iter().rev() {
-                let pred_gate = gate_map
-                    .get(skeleton_graph.node_weight(*pred).unwrap())
-                    .unwrap();
+        // let mut transitive_connections_to_remove = HashSet::new();
+        // let mut transitive_connections_to_add = vec![HashSet::new(); cin_gates.len()];
+        // let chunk_size = top_sorted_predecessors.len() / (current_num_threads()   / 4);
 
-                if pred_gate.check_collision(gate_i) {
-                    let gate_i_dc = direct_connections.get(&gate_i.id()).unwrap();
-                    let pred_direct_collisions = direct_connections.get(&pred_gate.id()).unwrap();
+        let (mut tc_to_add, tc_to_remove, direct_outgoing_to_add, direct_incoming_to_add) =
+            cin_gates
+                .par_iter()
+                .enumerate()
+                .map(|(i, gate_i)| {
+                    let mut gate_i_pred_collisions = HashSet::new();
 
-                    // Remove all transitive edges to nodes that gate_i has direct connections with.
-                    for gate_id in pred_direct_collisions.intersection(gate_i_dc) {
-                        transitive_connections_to_remove.insert((pred_gate.id(), *gate_id));
+                    let mut tc_add = HashSet::new();
+                    let mut tc_remove = HashSet::new();
+
+                    let mut direct_outgoing_to_insert = HashMap::new();
+                    let mut direct_incoming_to_insert = HashMap::new();
+
+                    // It is possible to chunk topologically sorted predecessors into multiple chunks (ideally `top_sorted_predecessors.len() / (current_num_threads() / 4)`)
+                    // and process each chunk separately. After which remove transtive edge from predecessor A to the gate if there exist an edge from a direct connection of A
+                    // in any of the succeding chunks.
+                    // We're deprioritising this for the moment.
+
+                    for pred in top_sorted_predecessors.iter().rev() {
+                        let pred_gate = gate_map
+                            .get(skeleton_graph.node_weight(*pred).unwrap())
+                            .unwrap();
+
+                        if pred_gate.check_collision(gate_i) {
+                            let gate_i_dc = direct_connections.get(&gate_i.id()).unwrap();
+                            let pred_direct_collisions =
+                                direct_connections.get(&pred_gate.id()).unwrap();
+
+                            // Remove all transitive edges to nodes that gate_i has direct connections with.
+                            for gate_id in pred_direct_collisions.intersection(gate_i_dc) {
+                                tc_remove.insert((pred_gate.id(), *gate_id));
+                            }
+
+                            // only add transitive edge from pred to gate i if there's no gate beetwen pred and gate i which collides with both.
+                            if pred_direct_collisions.is_disjoint(&gate_i_pred_collisions) {
+                                tc_add.insert(pred_gate.id());
+                            }
+
+                            direct_outgoing_to_insert
+                                .entry(pred_gate.id())
+                                .or_insert(HashSet::new())
+                                .insert(gate_i.id());
+                            direct_incoming_to_insert
+                                .entry(gate_i.id())
+                                .or_insert(HashSet::new())
+                                .insert(pred_gate.id());
+
+                            gate_i_pred_collisions.insert(pred_gate.id());
+                        }
                     }
 
-                    // only add transitive edge from pred to gate i if there's no gate beetwen pred and gate i which collides with both.
-                    if pred_direct_collisions.is_disjoint(&gate_i_pred_collisions) {
-                        // log::trace!(
-                        //     "Adding new edge from pred to c^in gate = {} -> {}",
-                        //     pred_gate.id(),
-                        //     gate_i.id()
-                        // );
-                        transitive_connections_to_add[i].insert(pred_gate.id());
-                    }
+                    let mut tc_add_out = HashMap::new();
+                    tc_add_out.insert(i, tc_add);
 
-                    direct_connections
-                        .get_mut(&pred_gate.id())
-                        .unwrap()
-                        .insert(gate_i.id());
-                    direct_incoming_connections
-                        .get_mut(&gate_i.id())
-                        .unwrap()
-                        .insert(pred_gate.id());
-                    gate_i_pred_collisions.insert(pred_gate.id());
-                }
-            }
+                    (
+                        tc_add_out,
+                        tc_remove,
+                        direct_outgoing_to_insert,
+                        direct_incoming_to_insert,
+                    )
+                })
+                .reduce(
+                    || {
+                        (
+                            HashMap::new(),
+                            HashSet::new(),
+                            HashMap::new(),
+                            HashMap::new(),
+                        )
+                    },
+                    |(
+                        mut tc_add_out0,
+                        mut tc_remove0,
+                        mut direct_outgoing_to_insert0,
+                        mut direct_incoming_to_insert0,
+                    ),
+                     (
+                        tc_add_out1,
+                        tc_remove1,
+                        direct_outgoing_to_insert1,
+                        direct_incoming_to_insert1,
+                    )| {
+                        // tc_add_out0.extend(tc_add_out1);
+                        tc_remove0.extend(tc_remove1);
+                        // direct_outgoing_to_insert0.extend(direct_outgoing_to_insert1);
+                        // direct_incoming_to_insert0.extend(direct_incoming_to_insert1);
 
-            // log::trace!(
-            //     "Pred collisions for gate {i} with gateid {} = {:?}",
-            //     gate_i.id(),
-            //     &gate_i_pred_collisions
-            // );
-        }
+                        for (k, v) in tc_add_out1 {
+                            assert!(tc_add_out0.insert(k, v).is_none());
+                        }
+
+                        for (k, v) in direct_outgoing_to_insert1 {
+                            direct_outgoing_to_insert0
+                                .entry(k)
+                                .or_insert(HashSet::new())
+                                .extend(v);
+                        }
+
+                        for (k, v) in direct_incoming_to_insert1 {
+                            direct_incoming_to_insert0
+                                .entry(k)
+                                .or_insert(HashSet::new())
+                                .extend(v);
+                        }
+
+                        (
+                            tc_add_out0,
+                            tc_remove0,
+                            direct_outgoing_to_insert0,
+                            direct_incoming_to_insert0,
+                        )
+                    },
+                );
 
         for i in (0..cin_gates.len()).rev() {
             let i_id = cin_gates[i].id();
+
             for j in 0..i {
                 let j_id = cin_gates[j].id();
                 let dc_j = direct_connections.get(&j_id).unwrap();
 
                 if dc_j.contains(&i_id) {
+                    let tc_to_add_i = tc_to_add.get(&i).unwrap();
+                    let tc_to_add_j = tc_to_add.get(&j).unwrap();
+
                     let mut to_remove = HashSet::new();
-                    for node in transitive_connections_to_add[i]
-                        .intersection(&transitive_connections_to_add[j])
-                    {
+                    for node in tc_to_add_i.intersection(tc_to_add_j) {
                         to_remove.insert(*node);
                     }
-                    transitive_connections_to_add[i].retain(|id| !to_remove.contains(id));
+
+                    tc_to_add
+                        .get_mut(&i)
+                        .unwrap()
+                        .retain(|id| !to_remove.contains(id));
                 }
             }
         }
 
-        for remove_tup in transitive_connections_to_remove {
+        for remove_tup in tc_to_remove {
             remove_edges.insert((
                 *gate_id_to_node_index_map.get(&remove_tup.0).unwrap(),
                 *gate_id_to_node_index_map.get(&remove_tup.1).unwrap(),
             ));
         }
 
-        for (i, incoming_conn_cin_gate_i) in transitive_connections_to_add.iter().enumerate() {
+        for (i, incoming_conn_cin_gate_i) in tc_to_add.iter() {
             for id in incoming_conn_cin_gate_i {
                 new_edges.insert((
                     *gate_id_to_node_index_map.get(id).unwrap(),
-                    *gate_id_to_node_index_map.get(&cin_gates[i].id()).unwrap(),
+                    *gate_id_to_node_index_map.get(&cin_gates[*i].id()).unwrap(),
                 ));
             }
+        }
+
+        // Extend direct outgoing connections and direct incoming connections
+        for (k, v) in direct_outgoing_to_add {
+            direct_connections.get_mut(&k).unwrap().extend(v);
+        }
+        for (k, v) in direct_incoming_to_add {
+            direct_incoming_connections.get_mut(&k).unwrap().extend(v);
         }
     });
 
