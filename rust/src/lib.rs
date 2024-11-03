@@ -1736,9 +1736,9 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 }
 
 pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCore>(
-    stage_name: &str,
+    tag: &str,
     original_circuit: Option<&Circuit<BaseGate<2, u8>>>,
-    mut skeleton_graph: Graph<usize, usize>,
+    skeleton_graph: &mut Graph<usize, usize>,
     direct_connections: &mut HashMap<usize, HashSet<usize>>,
     direct_incoming_connections: &mut HashMap<usize, HashSet<usize>>,
     gate_map: &mut HashMap<usize, BaseGate<2, u8>>,
@@ -1749,91 +1749,82 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
     rng: &mut R,
     ell_out: usize,
     ell_in: usize,
-    mut mixing_steps: usize,
-    total_mixing_steps: usize,
     max_convex_iterations: usize,
     max_replacement_iterations: usize,
-    mut cb: impl FnMut(usize, Circuit<BaseGate<2, u8>>),
-) -> Graph<usize, usize> {
+    to_checkpoint: bool,
+    mut cb: impl FnMut(Circuit<BaseGate<2, u8>>),
+) -> bool {
     if DEBUG {
         assert!(original_circuit.is_some());
     }
 
-    while mixing_steps < total_mixing_steps {
-        log::info!("############################## {stage_name} mixing step {mixing_steps} ##############################");
+    log::info!("############################## [run_local_mixing START] {tag} ##############################");
 
-        let now = std::time::Instant::now();
-        let success = local_mixing_step::<_>(
-            &mut skeleton_graph,
-            ell_in,
-            ell_out,
-            n,
-            direct_connections,
-            direct_incoming_connections,
-            gate_map,
-            gate_id_to_node_index_map,
-            graph_neighbors,
-            latest_id,
-            max_replacement_iterations,
-            max_convex_iterations,
-            rng,
-        );
-        let elapsed = now.elapsed();
+    let now = std::time::Instant::now();
+    let success = local_mixing_step::<_>(
+        skeleton_graph,
+        ell_in,
+        ell_out,
+        n,
+        direct_connections,
+        direct_incoming_connections,
+        gate_map,
+        gate_id_to_node_index_map,
+        graph_neighbors,
+        latest_id,
+        max_replacement_iterations,
+        max_convex_iterations,
+        rng,
+    );
+    let elapsed = now.elapsed();
 
-        log::info!(
-            "local mixing step {mixing_steps} returned {success} in {:?}",
-            elapsed
-        );
+    log::info!("local mixing step returned {success} in {:?}", elapsed);
 
-        if success {
-            mixing_steps += 1;
+    if success {
+        if DEBUG || to_checkpoint {
+            let original_circuit = original_circuit.unwrap();
 
-            if DEBUG || mixing_steps % 100 == 0 {
-                let original_circuit = original_circuit.unwrap();
+            let top_sort_res = timed!(
+                "Topological sort after local mixing",
+                toposort(skeleton_graph.deref(), None)
+            );
+            match top_sort_res {
+                Result::Ok(top_sorted_nodes) => {
+                    #[cfg(feature = "trace")]
+                    log::trace!(
+                        "Top sort after local mixing: {:?}",
+                        node_indices_to_gate_ids(top_sorted_nodes.iter(), &skeleton_graph)
+                    );
 
-                let top_sort_res = timed!(
-                    "Topological sort after local mixing",
-                    toposort(&skeleton_graph, None)
-                );
-                match top_sort_res {
-                    Result::Ok(top_sorted_nodes) => {
-                        log::trace!(
-                            "Top sort after local mixing: {:?}",
-                            node_indices_to_gate_ids(top_sorted_nodes.iter(), &skeleton_graph)
+                    let mixed_circuit = Circuit::from_top_sorted_nodes(
+                        &top_sorted_nodes,
+                        &skeleton_graph,
+                        &gate_map,
+                        original_circuit.n(),
+                    );
+
+                    let (is_correct, diff_indices) =
+                        check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, rng);
+                    if !is_correct {
+                        println!(
+                            "[Error] Failed at step tag {tag}. Different at indices {:?}",
+                            diff_indices
                         );
-
-                        let mixed_circuit = Circuit::from_top_sorted_nodes(
-                            &top_sorted_nodes,
-                            &skeleton_graph,
-                            &gate_map,
-                            original_circuit.n(),
-                        );
-
-                        let (is_correct, diff_indices) = check_probabilisitic_equivalence(
-                            &original_circuit,
-                            &mixed_circuit,
-                            rng,
-                        );
-                        if !is_correct {
-                            println!(
-                                "[Error] Failed at {stage_name} step {mixing_steps}. Different at indices {:?}",
-                                diff_indices
-                            );
-                            assert!(false);
-                        }
-
-                        cb(mixing_steps, mixed_circuit);
-                    }
-                    Err(_) => {
-                        log::error!("Cycle detected!");
                         assert!(false);
                     }
+
+                    cb(mixed_circuit);
+                }
+                Err(_) => {
+                    log::error!("Cycle detected!");
+                    assert!(false);
                 }
             }
         }
     }
 
-    skeleton_graph
+    log::info!("############################## [run_local_mixing FINISH] {tag} ##############################");
+    success
 }
 
 pub fn check_probabilisitic_equivalence<G, R: RngCore>(
