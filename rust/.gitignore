@@ -4,3 +4,4 @@ target
 log
 *.log
 *.bin
+test_outputs/

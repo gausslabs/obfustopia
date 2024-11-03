@@ -4,11 +4,11 @@ use rand_chacha::ChaCha8Rng;
 use rust::{
     check_probabilisitic_equivalence,
     circuit::{BaseGate, Circuit},
-    prepare_circuit, run_local_mixing, sample_circuit_with_base_gate,
+    prepare_circuit, run_local_mixing,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, env::args, path::Path};
+use std::{env::args, error::Error, path::Path};
 
 #[derive(Serialize, Deserialize)]
 enum Strategy {
@@ -74,6 +74,14 @@ impl ObfuscationConfig {
             total_steps: 0,
             checkpoint_steps,
         }
+    }
+
+    fn default_strategy1() -> Self {
+        ObfuscationConfig::new_with_strategy1(64, 4000, 10000, 1000000, 1000)
+    }
+
+    fn default_strategy2() -> Self {
+        ObfuscationConfig::new_with_strategy2(64, 2000, 2000, 10000, 1000000, 1000)
     }
 }
 
@@ -183,7 +191,7 @@ fn run_strategy1(job: &mut ObfuscationJob, job_path: String) {
         let (is_correct, diff_indices) =
             check_probabilisitic_equivalence(&job.curr_circuit, &original_circuit, &mut rng);
         if !is_correct {
-            println!(
+            log::error!(
                 "[Error] [Strategy 1] Failed at end of Mixing stage. Different at indices {:?}",
                 diff_indices
             );
@@ -258,7 +266,7 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String) {
             let (is_correct, diff_indices) =
                 check_probabilisitic_equivalence(&job.curr_circuit, &original_circuit, &mut rng);
             if !is_correct {
-                println!(
+                log::error!(
                     "[Error] [Strategy 2] Failed at end of Inflationary stage. Different at indices {:?}",
                     diff_indices
                 );
@@ -318,7 +326,7 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String) {
             let (is_correct, diff_indices) =
                 check_probabilisitic_equivalence(&job.curr_circuit, &original_circuit, &mut rng);
             if !is_correct {
-                println!(
+                log::error!(
                     "[Error] [Strategy 2] Failed at end of kneading stage. Different at indices {:?}",
                     diff_indices
                 );
@@ -330,24 +338,63 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String) {
     }
 }
 
-fn main() {
-    log4rs::init_file("log4rs.yaml", Default::default()).unwrap();
-    // env_logger::init();
+fn create_log4rs_config(log_path: &str) -> Result<log4rs::Config, Box<dyn Error>> {
+    // Define the file appender with the specified path and pattern
+    let file_appender = log4rs::append::file::FileAppender::builder()
+        .encoder(Box::new(log4rs::encode::pattern::PatternEncoder::new(
+            "{d} - {l} - {m}{n}",
+        )))
+        .build(log_path)?;
 
-    let job_path = args().nth(1).expect("Job path");
-    let orignal_circuit_path = args().nth(2).expect("Original path");
+    // Build the configuration
+    let config = log4rs::Config::builder()
+        .appender(log4rs::config::Appender::builder().build("file", Box::new(file_appender)))
+        .build(
+            log4rs::config::Root::builder()
+                .appender("file")
+                .build(log::LevelFilter::Trace),
+        )?;
+
+    Ok(config)
+}
+
+fn main() {
+    // Setup logs
+    let log_path = args().nth(1).expect("Log path");
+    let log_confg = create_log4rs_config(&log_path).unwrap();
+    log4rs::init_config(log_confg).unwrap();
+
+    let job_path = args().nth(2).expect("Job path");
+    let orignal_circuit_path = args().nth(3).expect("Original path");
 
     let mut job = if std::fs::exists(&job_path).unwrap() {
         ObfuscationJob::load(&job_path)
     } else {
-        // let config = ObfuscationConfig {
-        //     n: 64,
-        //     inflationary_stage_steps: 2000,
-        //     kneading_stage_steps: 2000,
-        //     max_convex_iterations: 10000,
-        //     max_replacement_iterations: 1000000,
-        // };
-        let config = ObfuscationConfig::new_with_strategy1(64, 300000, 10000, 1000000, 1000);
+        let strategy = args().nth(4).map_or_else(
+            || Strategy::Strategy1,
+            |sid| match sid.parse::<u8>() {
+                Ok(sid) => {
+                    if sid == 1 {
+                        return Strategy::Strategy1;
+                    } else if sid == 2 {
+                        return Strategy::Strategy2;
+                    } else {
+                        assert!(false, "Strategy can either be 1 or 2, not {sid}");
+                        return Strategy::Strategy1; // Just to calm the compiler
+                    }
+                }
+                Err(e) => {
+                    assert!(false, "Strategy can either be 1 or 2, not {sid}");
+                    return Strategy::Strategy1; // Just to calm the compiler
+                }
+            },
+        );
+
+        let config = match strategy {
+            Strategy::Strategy1 => ObfuscationConfig::default_strategy1(),
+            Strategy::Strategy2 => ObfuscationConfig::default_strategy2(),
+        };
+
         // let (original_circuit, _) =
         // sample_circuit_with_base_gate::<2, u8, _>(300, config.n as u8, 1.0, &mut thread_rng());
         // Circuit::sample_mutli_stage_cipher(config.n, thread_rng());

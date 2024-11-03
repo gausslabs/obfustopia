@@ -5,7 +5,7 @@ use itertools::{chain, izip, Itertools};
 use num_traits::Zero;
 use petgraph::{
     algo::toposort,
-    graph::NodeIndex,
+    graph::{EdgeIndex, NodeIndex},
     visit::{EdgeRef, IntoNodeIdentifiers},
     Direction::{self, Outgoing},
     Graph,
@@ -1633,7 +1633,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     }
 
     timed!(
-        "Deleting C^out auxilary data", // delete C^out
+        "Delete C^out's auxilary data", // delete C^out
         for (gate_id) in cout_ids.iter() {
             direct_connections.remove(gate_id).unwrap();
             direct_incoming_connections.remove(gate_id).unwrap();
@@ -1720,57 +1720,64 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
     // Remove edges
     let mut real_removed_edge_targets = HashSet::new();
-    for edge in remove_edges {
-        let mut e = skeleton_graph
-            .edges(edge.0)
-            .filter(|e| e.target() == edge.1);
-        match e.next() {
-            Some(e) => {
-                #[cfg(feature = "trace")]
-                log::trace!(
-                    "Removed transitive connection: Source={} Target={}",
-                    skeleton_graph.node_weight(edge.0).unwrap(),
-                    skeleton_graph.node_weight(edge.1).unwrap(),
-                );
+    timed!("Removing edges", {
+        let to_remove_edges_with_source_target_node_index: Vec<(
+            EdgeIndex,
+            (NodeIndex, NodeIndex),
+        )> = remove_edges
+            .par_iter()
+            .filter_map(|edge| match skeleton_graph.find_edge(edge.0, edge.1) {
+                Some(e) => Some((e, *edge)),
+                None => None,
+            })
+            .collect();
 
-                real_removed_edge_targets.insert(e.source());
-                real_removed_edge_targets.insert(e.target());
-
-                skeleton_graph.remove_edge(e.id());
-            }
-            None => {}
-        }
-        // assert!(e.next())
-    }
+        to_remove_edges_with_source_target_node_index
+            .into_iter()
+            .for_each(|(edge_index, (source_index, target_index))| {
+                real_removed_edge_targets.insert(source_index);
+                real_removed_edge_targets.insert(target_index);
+                skeleton_graph.remove_edge(edge_index);
+            });
+    });
 
     // Add new edges
-    for edge in &new_edges {
-        skeleton_graph.add_edge(edge.0, edge.1, Default::default());
-    }
+    timed!(
+        "Add new edges",
+        for edge in &new_edges {
+            skeleton_graph.add_edge(edge.0, edge.1, Default::default());
+        }
+    );
 
-    // Delete C^out
-    // Index of removed node is take over by the node that has the last index. Here we remove \ell^out nodes.
-    // As long as \ell^out <= \ell^in (notice that C^in gates are added before removing gates of C^out) none of
-    // pre-existing nodes we replace the removed node and hence we wouldn't incorrectly delete some node.
-    for node in cout_convex_subset.iter() {
-        skeleton_graph.remove_node(*node).unwrap();
-    }
+    timed!(
+        "Delete C^out",
+        // Delete C^out
+        // Index of removed node is take over by the node that has the last index. Here we remove \ell^out nodes.
+        // As long as \ell^out <= \ell^in (notice that C^in gates are added before removing gates of C^out) none of
+        // pre-existing nodes we replace the removed node and hence we wouldn't incorrectly delete some node.
+        for node in cout_convex_subset.iter() {
+            skeleton_graph.remove_node(*node).unwrap();
+        }
+    );
 
-    update_graph_neighbors(
-        skeleton_graph,
-        graph_neighbours,
-        chain![
-            cout_convex_subset.iter().copied(),
-            cin_nodes.iter().take(ell_in - ell_out).copied(),
-            c_out_imm_predecessors.iter().copied(),
-            c_out_imm_successors.iter().copied(),
-            new_edges
-                .iter()
-                .flat_map(|e| [e.0, e.1])
-                .filter(|target| target.index() < skeleton_graph.node_count()),
-            real_removed_edge_targets.iter().copied(),
-        ]
-        .collect(),
+    timed!(
+        "Update graph neighbours",
+        update_graph_neighbors(
+            skeleton_graph,
+            graph_neighbours,
+            chain![
+                cout_convex_subset.iter().copied(),
+                cin_nodes.iter().take(ell_in - ell_out).copied(),
+                c_out_imm_predecessors.iter().copied(),
+                c_out_imm_successors.iter().copied(),
+                new_edges
+                    .iter()
+                    .flat_map(|e| [e.0, e.1])
+                    .filter(|target| target.index() < skeleton_graph.node_count()),
+                real_removed_edge_targets.iter().copied(),
+            ]
+            .collect(),
+        )
     );
 
     // let iii = izip!(
@@ -1811,11 +1818,14 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     // }
 
     // update gate_id to node_index map
-    for node in skeleton_graph.node_indices() {
-        assert!(gate_id_to_node_index_map
-            .insert(*skeleton_graph.node_weight(node).unwrap(), node)
-            .is_some());
-    }
+    timed!(
+        "Update gate_id_to_node_index_map",
+        for node in skeleton_graph.node_indices() {
+            assert!(gate_id_to_node_index_map
+                .insert(*skeleton_graph.node_weight(node).unwrap(), node)
+                .is_some());
+        }
+    );
 
     return true;
 }
@@ -1891,8 +1901,8 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
                     let (is_correct, diff_indices) =
                         check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, rng);
                     if !is_correct {
-                        println!(
-                            "[Error] Failed at step tag {tag}. Different at indices {:?}",
+                        log::error!(
+                            "[Error] (Failed equivalence check at) {tag}. Different at indices {:?}",
                             diff_indices
                         );
                         assert!(false);
@@ -2065,7 +2075,12 @@ mod tests {
                     &gate_map,
                     original_circuit.n(),
                 );
-                check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, &mut rng);
+                let (is_correct, diff_indices) =
+                    check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, &mut rng);
+                if !is_correct {
+                    println!("[Error] Different at indices {:?}", diff_indices);
+                    assert!(false);
+                }
 
                 mixing_steps += 1;
             }
