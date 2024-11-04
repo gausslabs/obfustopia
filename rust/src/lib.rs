@@ -1830,7 +1830,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     return true;
 }
 
-pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCore>(
+pub fn run_local_mixing<R: Send + Sync + SeedableRng + RngCore>(
     tag: &str,
     original_circuit: Option<&Circuit<BaseGate<2, u8>>>,
     skeleton_graph: &mut Graph<usize, usize>,
@@ -1848,8 +1848,9 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
     max_replacement_iterations: usize,
     to_checkpoint: bool,
     mut cb: impl FnMut(Circuit<BaseGate<2, u8>>),
+    debug: bool,
 ) -> bool {
-    if DEBUG {
+    if debug {
         assert!(original_circuit.is_some());
     }
 
@@ -1876,7 +1877,7 @@ pub fn run_local_mixing<const DEBUG: bool, R: Send + Sync + SeedableRng + RngCor
     log::info!("local mixing step returned {success} in {:?}", elapsed);
 
     if success {
-        if DEBUG || to_checkpoint {
+        if debug || to_checkpoint {
             let original_circuit = original_circuit.unwrap();
 
             let top_sort_res = timed!(

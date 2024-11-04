@@ -8,9 +8,13 @@ use rust::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{env::args, error::Error, path::Path};
+use std::{
+    env::{self, args},
+    error::Error,
+    path::Path,
+};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 enum Strategy {
     Strategy1,
     Strategy2,
@@ -102,12 +106,45 @@ impl ObfuscationJob {
     fn load(path: impl AsRef<Path>) -> Self {
         let job: ObfuscationJob = bincode::deserialize(&std::fs::read(path).unwrap()).unwrap();
 
+        #[allow(dead_code)]
+        #[derive(Debug)]
+        struct Status {
+            n: usize,
+            total_steps: usize,
+            inflationary_stage_steps: usize,
+            kneading_stage_steps: usize,
+            max_convex_iterations: usize,
+            max_replacement_iterations: usize,
+            starategy: Strategy,
+            checkpoint_steps: usize,
+            curr_total_steps: usize,
+            curr_inflationary_stage_steps: usize,
+            curr_kneading_stage_steps: usize,
+            curr_circuit_digest: String,
+            original_circuit_digest: String,
+        }
+
         log::info!(
-            "loaded job: curr_inflationary_stage_steps: {}, curr_inflationary_stage_steps: {}, curr_circuit digest: 0x{}, original_circuit digest: 0x{}",
-            job.curr_inflationary_stage_steps,
-            job.curr_kneading_stage_steps,
-            hex::encode(Sha256::digest(bincode::serialize(&job.curr_circuit).unwrap())),
-            hex::encode(Sha256::digest(bincode::serialize(&job.original_circuit).unwrap())),
+            "loaded job: {:#?}",
+            Status {
+                n: job.config.n,
+                total_steps: job.config.total_steps,
+                inflationary_stage_steps: job.config.inflationary_stage_steps,
+                kneading_stage_steps: job.config.kneading_stage_steps,
+                max_convex_iterations: job.config.max_convex_iterations,
+                max_replacement_iterations: job.config.max_replacement_iterations,
+                starategy: job.config.starategy,
+                checkpoint_steps: job.config.checkpoint_steps,
+                curr_total_steps: job.curr_total_steps,
+                curr_inflationary_stage_steps: job.curr_inflationary_stage_steps,
+                curr_kneading_stage_steps: job.curr_kneading_stage_steps,
+                curr_circuit_digest: hex::encode(Sha256::digest(
+                    bincode::serialize(&job.curr_circuit).unwrap()
+                )),
+                original_circuit_digest: hex::encode(Sha256::digest(
+                    bincode::serialize(&job.original_circuit).unwrap()
+                )),
+            }
         );
 
         job
@@ -117,7 +154,7 @@ impl ObfuscationJob {
         std::fs::write(&path, bincode::serialize(self).unwrap()).unwrap();
 
         log::info!(
-            "stored job: curr_inflationary_stage_steps: {}, curr_inflationary_stage_steps: {}, curr_circuit digest: 0x{}, original_circuit digest: 0x{}",
+            "stored job, curr_inflationary_stage_steps: {}, curr_kneading_stage_steps: {}, curr_circuit digest: 0x{}, original_circuit digest: 0x{}",
             self.curr_inflationary_stage_steps,
             self.curr_kneading_stage_steps,
             hex::encode(Sha256::digest(bincode::serialize(&self.curr_circuit).unwrap())),
@@ -126,7 +163,7 @@ impl ObfuscationJob {
     }
 }
 
-fn run_strategy1(job: &mut ObfuscationJob, job_path: String) {
+fn run_strategy1(job: &mut ObfuscationJob, job_path: String, debug: bool) {
     let original_circuit = job.original_circuit.clone();
     let mut rng = ChaCha8Rng::from_entropy();
 
@@ -148,7 +185,7 @@ fn run_strategy1(job: &mut ObfuscationJob, job_path: String) {
         let ell_out = rng.gen_range(2..=4);
         let to_checkpoint = job.curr_total_steps % job.config.checkpoint_steps == 0;
 
-        let success = run_local_mixing::<true, _>(
+        let success = run_local_mixing(
             &format!(
                 "[Strategy 1] [ell^out = {}] Mixing stage step {}",
                 ell_out, job.curr_total_steps
@@ -172,6 +209,7 @@ fn run_strategy1(job: &mut ObfuscationJob, job_path: String) {
                 job.curr_circuit = mixed_circuit;
                 job.store(&job_path);
             },
+            debug,
         );
         if success {
             job.curr_total_steps += 1;
@@ -202,7 +240,7 @@ fn run_strategy1(job: &mut ObfuscationJob, job_path: String) {
     }
 }
 
-fn run_strategy2(job: &mut ObfuscationJob, job_path: String) {
+fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
     let original_circuit = job.original_circuit.clone();
     let mut rng = ChaCha8Rng::from_entropy();
 
@@ -223,7 +261,7 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String) {
                 job.curr_inflationary_stage_steps % job.config.checkpoint_steps == 0;
 
             // Inflationary stage
-            let success = run_local_mixing::<true, _>(
+            let success = run_local_mixing(
                 &format!(
                     "[Strategy 2] Inflationary stage step {}",
                     job.curr_inflationary_stage_steps
@@ -247,6 +285,7 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String) {
                     job.curr_circuit = mixed_circuit;
                     job.store(&job_path);
                 },
+                debug,
             );
             if success {
                 job.curr_inflationary_stage_steps += 1;
@@ -282,7 +321,7 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String) {
         while job.curr_kneading_stage_steps < job.config.kneading_stage_steps {
             let to_checkpoint = job.curr_kneading_stage_steps % job.config.checkpoint_steps == 0;
 
-            let success = run_local_mixing::<true, _>(
+            let success = run_local_mixing(
                 &format!(
                     "[Strategy 2] Kneading stage step {}",
                     job.curr_kneading_stage_steps
@@ -306,6 +345,7 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String) {
                     job.curr_circuit = mixed_circuit;
                     job.store(&job_path);
                 },
+                debug,
             );
 
             if success {
@@ -359,6 +399,11 @@ fn create_log4rs_config(log_path: &str) -> Result<log4rs::Config, Box<dyn Error>
 }
 
 fn main() {
+    let debug = env::var("DEBUG") // only support `DEBUG=true` or `DEBUG=false`
+        .ok()
+        .and_then(|var| var.parse().ok())
+        .unwrap_or(true);
+
     // Setup logs
     let log_path = args().nth(1).expect("Log path");
     let log_confg = create_log4rs_config(&log_path).unwrap();
@@ -418,10 +463,10 @@ fn main() {
 
     match job.config.starategy {
         Strategy::Strategy1 => {
-            run_strategy1(&mut job, job_path);
+            run_strategy1(&mut job, job_path, debug);
         }
         Strategy::Strategy2 => {
-            run_strategy2(&mut job, job_path);
+            run_strategy2(&mut job, job_path, debug);
         }
     }
 }
