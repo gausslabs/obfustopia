@@ -4,11 +4,12 @@ use rand_chacha::ChaCha8Rng;
 use rust::{
     check_probabilisitic_equivalence,
     circuit::{BaseGate, Circuit},
-    prepare_circuit, run_local_mixing,
+    graph_level, prepare_circuit, run_local_mixing, toposort_after_removed_nodes,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::{HashMap, HashSet},
     env::{self, args},
     error::Error,
     path::Path,
@@ -81,11 +82,11 @@ impl ObfuscationConfig {
     }
 
     fn default_strategy1() -> Self {
-        ObfuscationConfig::new_with_strategy1(64, 4000, 10000, 1000000, 1000)
+        ObfuscationConfig::new_with_strategy1(64, 400, 10000, 1000000, 1000)
     }
 
     fn default_strategy2() -> Self {
-        ObfuscationConfig::new_with_strategy2(64, 2000, 2000, 10000, 1000000, 1000)
+        ObfuscationConfig::new_with_strategy2(64, 200, 200, 10000, 1000000, 1000)
     }
 }
 
@@ -181,6 +182,8 @@ fn run_strategy1(job: &mut ObfuscationJob, job_path: String, debug: bool) {
     //  -> Sample a random no. betwee [2, 4]. Set that as ell_out
     //  -> Run local mixing step with ell_out and ell_in = 4
 
+    let mut removed_nodes = HashSet::new();
+
     while job.curr_total_steps < job.config.total_steps {
         let ell_out = rng.gen_range(2..=4);
         let to_checkpoint = job.curr_total_steps % job.config.checkpoint_steps == 0;
@@ -197,6 +200,7 @@ fn run_strategy1(job: &mut ObfuscationJob, job_path: String, debug: bool) {
             &mut gate_map,
             &mut gate_id_to_node_index_map,
             &mut graph_neighbours,
+            &mut removed_nodes,
             &mut latest_id,
             job.config.n as u8,
             &mut rng,
@@ -217,7 +221,9 @@ fn run_strategy1(job: &mut ObfuscationJob, job_path: String, debug: bool) {
     }
 
     {
-        let top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
+        let levels = graph_level(&skeleton_graph, &graph_neighbours, &removed_nodes);
+        let top_sorted_nodes =
+            toposort_after_removed_nodes(&skeleton_graph, &removed_nodes, &levels);
         job.curr_total_steps = job.config.total_steps;
         job.curr_circuit = Circuit::from_top_sorted_nodes(
             &top_sorted_nodes,
@@ -254,6 +260,8 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
         mut latest_id,
     ) = prepare_circuit(&original_circuit);
 
+    let mut removed_nodes = HashSet::new();
+
     // Inflationary stage
     {
         while job.curr_inflationary_stage_steps < job.config.inflationary_stage_steps {
@@ -273,6 +281,7 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
                 &mut gate_map,
                 &mut gate_id_to_node_index_map,
                 &mut graph_neighbours,
+                &mut removed_nodes,
                 &mut latest_id,
                 job.config.n as u8,
                 &mut rng,
@@ -293,7 +302,9 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
         }
 
         {
-            let top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
+            let levels = graph_level(&skeleton_graph, &graph_neighbours, &removed_nodes);
+            let top_sorted_nodes =
+                toposort_after_removed_nodes(&skeleton_graph, &removed_nodes, &levels);
             job.curr_inflationary_stage_steps = job.config.inflationary_stage_steps;
             job.curr_circuit = Circuit::from_top_sorted_nodes(
                 &top_sorted_nodes,
@@ -333,6 +344,7 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
                 &mut gate_map,
                 &mut gate_id_to_node_index_map,
                 &mut graph_neighbours,
+                &mut removed_nodes,
                 &mut latest_id,
                 job.config.n as u8,
                 &mut rng,
@@ -354,7 +366,9 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
         }
 
         {
-            let top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
+            let levels = graph_level(&skeleton_graph, &graph_neighbours, &removed_nodes);
+            let top_sorted_nodes =
+                toposort_after_removed_nodes(&skeleton_graph, &removed_nodes, &levels);
             job.curr_kneading_stage_steps = job.config.kneading_stage_steps;
             job.curr_circuit = Circuit::from_top_sorted_nodes(
                 &top_sorted_nodes,

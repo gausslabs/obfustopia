@@ -5,7 +5,7 @@ use itertools::{chain, izip, Itertools};
 use num_traits::Zero;
 use petgraph::{
     algo::toposort,
-    graph::{EdgeIndex, NodeIndex},
+    graph::{EdgeIndex, Node, NodeIndex},
     visit::{EdgeRef, IntoNodeIdentifiers},
     Direction::{self, Outgoing},
     Graph,
@@ -23,7 +23,7 @@ use rayon::{
     },
     slice::ParallelSliceMut,
 };
-use serde::{Deserialize, Serialize};
+
 use sha2::{Digest, Sha256};
 use std::{
     array::from_fn,
@@ -537,10 +537,26 @@ fn find_replacement_circuit_fast<R: Send + Sync + RngCore + SeedableRng>(
     }
 }
 
+pub fn toposort_after_removed_nodes(
+    skeleton_graph: &Graph<usize, usize>,
+    removed_nodes: &HashSet<NodeIndex>,
+    level: &[usize],
+) -> Vec<NodeIndex> {
+    let mut node_indices = skeleton_graph
+        .node_indices()
+        .into_iter()
+        .filter(|node| !removed_nodes.contains(node))
+        .collect_vec();
+
+    node_indices.par_sort_by(|a, b| level[a.index()].cmp(&level[b.index()]));
+    node_indices
+}
+
 fn dfs_fast(
     graph: &Graph<usize, usize>,
     sources: Vec<NodeIndex>,
     direction: Direction,
+    removed_nodes: &HashSet<NodeIndex>,
 ) -> HashSet<NodeIndex> {
     let visited = repeat_with(|| AtomicBool::new(false))
         .take(graph.node_count())
@@ -555,6 +571,7 @@ fn dfs_fast(
         while let Some(curr) = next.take().or_else(|| stack.lock().unwrap().pop()) {
             let mut succs = graph
                 .neighbors_directed(curr, direction)
+                .filter(|node| !removed_nodes.contains(node))
                 .flat_map(|succ| (!visited[succ.index()].swap(true, Relaxed)).then_some(succ))
                 .collect_vec();
             next = succs.pop();
@@ -578,6 +595,7 @@ fn dfs(
     path: &mut Vec<NodeIndex>,
     graph: &Graph<usize, usize>,
     direction: Direction,
+    removed_nodes: &HashSet<NodeIndex>,
 ) {
     if visited_with_path.contains(&curr_node) {
         path.iter().for_each(|node| {
@@ -591,8 +609,19 @@ fn dfs(
     }
 
     path.push(curr_node.clone());
-    for v in graph.neighbors_directed(curr_node.into(), direction) {
-        dfs(v, visited_with_path, visited, path, graph, direction);
+    for v in graph
+        .neighbors_directed(curr_node.into(), direction)
+        .filter(|node| !removed_nodes.contains(node))
+    {
+        dfs(
+            v,
+            visited_with_path,
+            visited,
+            path,
+            graph,
+            direction,
+            removed_nodes,
+        );
     }
     path.pop();
     visited.insert(curr_node);
@@ -608,7 +637,10 @@ fn dfs2(
     break_when: usize,
     max_level: usize,
     level: &[usize],
+    removed_nodes: &HashSet<NodeIndex>,
 ) -> bool {
+    assert!(!removed_nodes.contains(&curr_node));
+
     if visited_with_path.len() > break_when {
         return false;
     }
@@ -626,7 +658,10 @@ fn dfs2(
 
     let mut return_bool = true;
     path.push(curr_node.clone());
-    for v in graph.neighbors_directed(curr_node.into(), direction) {
+    for v in graph
+        .neighbors_directed(curr_node.into(), direction)
+        .filter(|node| !removed_nodes.contains(node))
+    {
         return_bool = return_bool
             && dfs2(
                 v,
@@ -638,6 +673,7 @@ fn dfs2(
                 break_when,
                 max_level,
                 level,
+                removed_nodes,
             );
 
         if !return_bool {
@@ -655,6 +691,7 @@ fn blah(
     convex_set: &mut HashSet<NodeIndex>,
     graph: &Graph<usize, usize>,
     level: &[usize],
+    removed_nodes: &HashSet<NodeIndex>,
 ) -> bool {
     if convex_set.len() == desire_set_size {
         return true;
@@ -669,7 +706,9 @@ fn blah(
                 Some(source_node) => {
                     // Pick just one outgoing edge.
                     // We really want to iterate over all edges in big graph! So just find the first one that's not in the convex set
-                    let mut edge_iter = graph.neighbors_directed(*source_node, Direction::Outgoing);
+                    let mut edge_iter = graph
+                        .neighbors_directed(*source_node, Direction::Outgoing)
+                        .filter(|node| !removed_nodes.contains(node));
                     loop {
                         match edge_iter.next() {
                             Some(potential_candidate) => {
@@ -722,6 +761,7 @@ fn blah(
             desire_set_size,
             level[candidate_node.index()],
             level,
+            removed_nodes,
         );
 
         if !dfs_did_not_break {
@@ -736,7 +776,7 @@ fn blah(
             convex_set.insert(node);
         }
         if convex_set.len() < desire_set_size {
-            return blah(desire_set_size, convex_set, graph, level);
+            return blah(desire_set_size, convex_set, graph, level, removed_nodes);
         } else {
             return true;
         }
@@ -778,13 +818,17 @@ impl<'a, T> UnsafeSlice<'a, T> {
 fn find_all_predecessors(
     convex_set: &HashSet<NodeIndex>,
     graph: &Graph<usize, usize>,
+    removed_nodes: &HashSet<NodeIndex>,
 ) -> HashSet<NodeIndex> {
     // Find all predecessors and successors of subgrpah C^out
     let mut imm_predecessors = HashSet::new();
 
     // First find all immediate predecessors and successors
     for node in convex_set.iter() {
-        for pred in graph.neighbors_directed(node.clone(), Direction::Incoming) {
+        for pred in graph
+            .neighbors_directed(node.clone(), Direction::Incoming)
+            .filter(|node| !removed_nodes.contains(node))
+        {
             if !convex_set.contains(&pred) {
                 imm_predecessors.insert(pred);
             }
@@ -795,6 +839,7 @@ fn find_all_predecessors(
         graph,
         Vec::from_iter(imm_predecessors.clone()),
         Direction::Incoming,
+        removed_nodes,
     );
 
     return predecessors;
@@ -803,11 +848,15 @@ fn find_all_predecessors(
 fn find_all_successors(
     convex_set: &HashSet<NodeIndex>,
     graph: &Graph<usize, usize>,
+    removed_nodes: &HashSet<NodeIndex>,
 ) -> HashSet<NodeIndex> {
     let mut imm_successors = HashSet::new();
     // First find all immediate predecessors and successors
     for node in convex_set.iter() {
-        for succ in graph.neighbors_directed(node.clone(), Direction::Outgoing) {
+        for succ in graph
+            .neighbors_directed(node.clone(), Direction::Outgoing)
+            .filter(|node| !removed_nodes.contains(node))
+        {
             if !convex_set.contains(&succ) {
                 imm_successors.insert(succ);
             }
@@ -818,17 +867,25 @@ fn find_all_successors(
         graph,
         Vec::from_iter(imm_successors.clone()),
         Direction::Outgoing,
+        removed_nodes,
     );
 
     return successors;
 }
 
-fn graph_neighbors(graph: &Graph<usize, usize>) -> Vec<[HashSet<NodeIndex>; 2]> {
+fn graph_neighbors(
+    graph: &Graph<usize, usize>,
+    removed_nodes: &HashSet<NodeIndex>,
+) -> Vec<[HashSet<NodeIndex>; 2]> {
     (0..graph.node_count() as _)
         .into_par_iter()
         .map(|n| {
-            [Direction::Incoming, Direction::Outgoing]
-                .map(|dir| graph.neighbors_directed(NodeIndex::from(n), dir).collect())
+            [Direction::Incoming, Direction::Outgoing].map(|dir| {
+                graph
+                    .neighbors_directed(NodeIndex::from(n), dir)
+                    .filter(|node| !removed_nodes.contains(node))
+                    .collect()
+            })
         })
         .collect()
 }
@@ -837,30 +894,50 @@ fn update_graph_neighbors(
     graph: &Graph<usize, usize>,
     in_degree: &mut Vec<[HashSet<NodeIndex>; 2]>,
     incoming: HashSet<NodeIndex>,
+    removed_nodes: &HashSet<NodeIndex>,
 ) {
     in_degree.resize_with(graph.node_count(), Default::default);
     let in_degree_slice = UnsafeSlice::new(in_degree);
     incoming.into_par_iter().for_each(|n| unsafe {
-        in_degree_slice.update(n.index(), |[incoming, outgoing]| {
-            *incoming = graph.neighbors_directed(n, Direction::Incoming).collect();
-            *outgoing = graph.neighbors_directed(n, Direction::Outgoing).collect()
-        })
+        if removed_nodes.contains(&n) {
+            in_degree_slice.update(n.index(), |[incoming, outgoing]| {
+                *incoming = HashSet::new();
+                *outgoing = HashSet::new();
+            })
+        } else {
+            in_degree_slice.update(n.index(), |[incoming, outgoing]| {
+                *incoming = graph
+                    .neighbors_directed(n, Direction::Incoming)
+                    .filter(|node| !removed_nodes.contains(node))
+                    .collect();
+                *outgoing = graph
+                    .neighbors_directed(n, Direction::Outgoing)
+                    .filter(|node| !removed_nodes.contains(node))
+                    .collect()
+            })
+        }
     });
 }
 
-fn graph_level(
+pub fn graph_level(
     graph: &Graph<usize, usize>,
     graph_neighbors: &[[HashSet<NodeIndex>; 2]],
+    removed_nodes: &HashSet<NodeIndex>,
 ) -> Vec<usize> {
     let stack = Arc::new(Mutex::new(Vec::new()));
     let degree = graph_neighbors
         .par_iter()
         .enumerate()
-        .map(|(n, [incomings, _])| {
-            if incomings.is_empty() {
+        .filter_map(|(n, [incomings, _])| {
+            if incomings.is_empty() && !removed_nodes.contains(&NodeIndex::from(n as u32)) {
                 stack.lock().unwrap().push(NodeIndex::from(n as u32));
             }
-            (AtomicUsize::new(incomings.len()), AtomicUsize::new(0))
+
+            for i in incomings.iter() {
+                assert!(!removed_nodes.contains(i));
+            }
+
+            return Some((AtomicUsize::new(incomings.len()), AtomicUsize::new(0)));
         })
         .collect::<Vec<_>>();
     let mut level = vec![0; graph.node_count()];
@@ -872,6 +949,7 @@ fn graph_level(
             unsafe { level_slice.write(curr.index(), curr_level) };
             let mut succs = graph_neighbors[curr.index()][1]
                 .iter()
+                .filter(|node| !removed_nodes.contains(*node))
                 .flat_map(|succ| {
                     let (succ_degree, succ_level) = &degree[succ.index()];
                     let succ_degree = succ_degree.fetch_sub(1, Relaxed);
@@ -898,6 +976,7 @@ fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
     ell_out: usize,
     max_iterations: usize,
     rng: &mut R,
+    removed_nodes: &HashSet<NodeIndex>,
 ) -> Option<(NodeIndex, HashSet<NodeIndex>)> {
     let max_iterations = max_iterations / current_num_threads();
 
@@ -911,10 +990,18 @@ fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
             let mut t = Duration::default();
             let mut curr_iter = 0;
             let mut return_set = None;
-            for start_node in repeat_with(|| rng.gen_range(0..graph.node_count() as u32))
-                .map(NodeIndex::from)
-                .take(max_iterations)
+            for start_node in (0..graph.node_count())
+                .filter(|index| !removed_nodes.contains(&NodeIndex::from(*index as u32)))
+                .collect_vec()
+                .choose_multiple(&mut rng, max_iterations)
+                .into_iter()
+                .map(|v| NodeIndex::from(*v as u32))
             {
+                assert!(
+                    !removed_nodes.contains(&start_node),
+                    "[find_convex_fast] Start node is in removed_nodes set"
+                );
+
                 if curr_iter % epoch_size == 0 && found.load(Relaxed) {
                     return None;
                 }
@@ -923,7 +1010,7 @@ fn find_convex_fast<R: Send + Sync + RngCore + SeedableRng>(
                 convex_set.insert(start_node);
 
                 let sttt = std::time::Instant::now();
-                let moment_of_truth = blah(ell_out, &mut convex_set, graph, &level);
+                let moment_of_truth = blah(ell_out, &mut convex_set, graph, &level, removed_nodes);
                 t += sttt.elapsed();
 
                 if moment_of_truth {
@@ -1072,7 +1159,7 @@ where
         gate_id_to_node_index_map.insert(*skeleton.node_weight(node).unwrap(), node);
     }
 
-    let graph_neighbours = graph_neighbors(&skeleton);
+    let graph_neighbours = graph_neighbors(&skeleton, &HashSet::new());
 
     (
         direct_connections_map,
@@ -1123,6 +1210,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     gate_map: &mut HashMap<usize, BaseGate<2, u8>>,
     gate_id_to_node_index_map: &mut HashMap<usize, NodeIndex>,
     graph_neighbours: &mut Vec<[HashSet<NodeIndex>; 2]>,
+    removed_nodes: &mut HashSet<NodeIndex>,
     latest_id: &mut usize,
     max_replacement_iterations: usize,
     max_convex_iterations: usize,
@@ -1130,11 +1218,18 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 ) -> bool {
     assert!(ell_out <= ell_in);
 
-    let level = graph_level(skeleton_graph, graph_neighbours);
+    let level = graph_level(skeleton_graph, graph_neighbours, &removed_nodes);
 
     let (cout_convex_start_node, cout_convex_subset) = timed!(
         "Find convex subcircuit",
-        match find_convex_fast(&skeleton_graph, &level, ell_out, max_convex_iterations, rng) {
+        match find_convex_fast(
+            &skeleton_graph,
+            &level,
+            ell_out,
+            max_convex_iterations,
+            rng,
+            removed_nodes
+        ) {
             Some((convex_start_node, convex_subset)) => (convex_start_node, convex_subset),
             None => {
                 log::trace!("[returned false] Find convex subscircuit");
@@ -1156,6 +1251,10 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     let convex_subgraph_top_sorted_gate_ids = convex_subset_top_sorted
         .iter()
         .map(|node_index| skeleton_graph.node_weight(*node_index).unwrap());
+
+    for node in convex_subset_top_sorted.iter() {
+        assert!(!removed_nodes.contains(node));
+    }
 
     #[cfg(feature = "trace")]
     log::trace!(
@@ -1265,12 +1364,18 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     let mut c_out_imm_successors = HashSet::new();
     // First find all immediate predecessors and successors
     for node in cout_convex_subset.iter() {
-        for pred in skeleton_graph.neighbors_directed(node.clone(), Direction::Incoming) {
+        for pred in skeleton_graph
+            .neighbors_directed(node.clone(), Direction::Incoming)
+            .filter(|node| !removed_nodes.contains(node))
+        {
             if !cout_convex_subset.contains(&pred) {
                 c_out_imm_predecessors.insert(pred);
             }
         }
-        for succ in skeleton_graph.neighbors_directed(node.clone(), Direction::Outgoing) {
+        for succ in skeleton_graph
+            .neighbors_directed(node.clone(), Direction::Outgoing)
+            .filter(|node| !removed_nodes.contains(node))
+        {
             if !cout_convex_subset.contains(&succ) {
                 c_out_imm_successors.insert(succ);
             }
@@ -1293,14 +1398,16 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
     let cout_predecessors = timed!(
         "Find all predecessors",
-        find_all_predecessors(&cout_convex_subset, &skeleton_graph)
+        find_all_predecessors(&cout_convex_subset, &skeleton_graph, removed_nodes)
     );
     let cout_successors = timed!(
         "Find all successors",
-        find_all_successors(&cout_convex_subset, &skeleton_graph)
+        find_all_successors(&cout_convex_subset, &skeleton_graph, removed_nodes)
     );
 
     assert!(cout_predecessors.is_disjoint(&cout_successors));
+    assert!(cout_predecessors.is_disjoint(&removed_nodes));
+    assert!(cout_successors.is_disjoint(&removed_nodes));
 
     let top_sorted_predecessors = {
         let mut top_sorted_predecessors = Vec::from_iter(cout_predecessors.iter().copied());
@@ -1318,7 +1425,8 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                 &cin_nodes,
                 &cout_convex_subset,
                 &cout_successors,
-                &cout_predecessors
+                &cout_predecessors,
+                removed_nodes.deref()
             ]
             .copied(),
         );
@@ -1755,8 +1863,11 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         // Index of removed node is take over by the node that has the last index. Here we remove \ell^out nodes.
         // As long as \ell^out <= \ell^in (notice that C^in gates are added before removing gates of C^out) none of
         // pre-existing nodes we replace the removed node and hence we wouldn't incorrectly delete some node.
+        // for node in cout_convex_subset.iter() {
+        //     skeleton_graph.remove_node(*node).unwrap();
+        // }
         for node in cout_convex_subset.iter() {
-            skeleton_graph.remove_node(*node).unwrap();
+            assert!(removed_nodes.insert(*node));
         }
     );
 
@@ -1767,16 +1878,15 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             graph_neighbours,
             chain![
                 cout_convex_subset.iter().copied(),
-                cin_nodes.iter().take(ell_in - ell_out).copied(),
+                cin_nodes.iter().copied(),
                 c_out_imm_predecessors.iter().copied(),
                 c_out_imm_successors.iter().copied(),
-                new_edges
-                    .iter()
-                    .flat_map(|e| [e.0, e.1])
-                    .filter(|target| target.index() < skeleton_graph.node_count()),
+                new_edges.iter().flat_map(|e| [e.0, e.1]),
+                // .filter(|target| target.index() < skeleton_graph.node_count()),
                 real_removed_edge_targets.iter().copied(),
             ]
             .collect(),
+            removed_nodes
         )
     );
 
@@ -1818,14 +1928,14 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     // }
 
     // update gate_id to node_index map
-    timed!(
-        "Update gate_id_to_node_index_map",
-        for node in skeleton_graph.node_indices() {
-            assert!(gate_id_to_node_index_map
-                .insert(*skeleton_graph.node_weight(node).unwrap(), node)
-                .is_some());
-        }
-    );
+    // timed!(
+    //     "Update gate_id_to_node_index_map",
+    //     for node in skeleton_graph.node_indices() {
+    //         assert!(gate_id_to_node_index_map
+    //             .insert(*skeleton_graph.node_weight(node).unwrap(), node)
+    //             .is_some());
+    //     }
+    // );
 
     return true;
 }
@@ -1839,6 +1949,7 @@ pub fn run_local_mixing<R: Send + Sync + SeedableRng + RngCore>(
     gate_map: &mut HashMap<usize, BaseGate<2, u8>>,
     gate_id_to_node_index_map: &mut HashMap<usize, NodeIndex>,
     graph_neighbors: &mut Vec<[HashSet<NodeIndex>; 2]>,
+    removed_nodes: &mut HashSet<NodeIndex>,
     latest_id: &mut usize,
     n: u8,
     rng: &mut R,
@@ -1867,6 +1978,7 @@ pub fn run_local_mixing<R: Send + Sync + SeedableRng + RngCore>(
         gate_map,
         gate_id_to_node_index_map,
         graph_neighbors,
+        removed_nodes,
         latest_id,
         max_replacement_iterations,
         max_convex_iterations,
@@ -1880,42 +1992,42 @@ pub fn run_local_mixing<R: Send + Sync + SeedableRng + RngCore>(
         if debug || to_checkpoint {
             let original_circuit = original_circuit.unwrap();
 
-            let top_sort_res = timed!(
-                "Topological sort after local mixing",
-                toposort(skeleton_graph.deref(), None)
+            let top_sorted_nodes = timed!("Topological sort after local mixing", {
+                let levels = graph_level(&skeleton_graph, graph_neighbors, removed_nodes);
+                toposort_after_removed_nodes(skeleton_graph.deref(), &removed_nodes, &levels)
+            });
+            // match top_sort_res {
+            // Result::Ok(top_sorted_nodes) => {
+            #[cfg(feature = "trace")]
+            log::trace!(
+                "Top sort after local mixing: {:?}",
+                node_indices_to_gate_ids(top_sorted_nodes.iter(), &skeleton_graph)
             );
-            match top_sort_res {
-                Result::Ok(top_sorted_nodes) => {
-                    #[cfg(feature = "trace")]
-                    log::trace!(
-                        "Top sort after local mixing: {:?}",
-                        node_indices_to_gate_ids(top_sorted_nodes.iter(), &skeleton_graph)
-                    );
 
-                    let mixed_circuit = Circuit::from_top_sorted_nodes(
-                        &top_sorted_nodes,
-                        &skeleton_graph,
-                        &gate_map,
-                        original_circuit.n(),
-                    );
+            let mixed_circuit = Circuit::from_top_sorted_nodes(
+                &top_sorted_nodes,
+                &skeleton_graph,
+                &gate_map,
+                original_circuit.n(),
+            );
 
-                    let (is_correct, diff_indices) =
-                        check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, rng);
-                    if !is_correct {
-                        log::error!(
-                            "[Error] (Failed equivalence check at) {tag}. Different at indices {:?}",
-                            diff_indices
-                        );
-                        assert!(false);
-                    }
-
-                    cb(mixed_circuit);
-                }
-                Err(_) => {
-                    log::error!("Cycle detected!");
-                    assert!(false);
-                }
+            let (is_correct, diff_indices) =
+                check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, rng);
+            if !is_correct {
+                log::error!(
+                    "[Error] (Failed equivalence check at) {tag}. Different at indices {:?}",
+                    diff_indices
+                );
+                assert!(false);
             }
+
+            cb(mixed_circuit);
+            // }
+            // Err(_) => {
+            //     log::error!("Cycle detected!");
+            //     assert!(false);
+            // }
+            // }
         }
     }
 
@@ -2011,6 +2123,8 @@ mod tests {
             mut latest_id,
         ) = prepare_circuit(&original_circuit);
 
+        let mut removed_nodes = HashSet::new();
+
         let mut mixing_steps = 0;
         let total_mixing_steps = 100;
 
@@ -2032,6 +2146,7 @@ mod tests {
                 &mut gate_map,
                 &mut gate_id_to_node_index_map,
                 &mut graph_neighbors,
+                &mut removed_nodes,
                 &mut latest_id,
                 max_replacement_iterations,
                 max_convex_iterations,
@@ -2054,16 +2169,18 @@ mod tests {
                 // println!("Original circuit: {:?}", original_circuit_graphviz);
                 // println!("Mixed circuit: {:?}", mixed_circuit_graphviz);
 
-                let top_sort_res = toposort(&skeleton_graph, None);
-                match top_sort_res {
-                    Result::Ok(v) => {
-                        top_sorted_nodes = v;
-                    }
-                    Err(_) => {
-                        log::error!("Cycle detected!");
-                        assert!(false);
-                    }
-                }
+                let levels = graph_level(&skeleton_graph, &graph_neighbors, &removed_nodes);
+                let top_sorted_nodes =
+                    toposort_after_removed_nodes(&skeleton_graph, &removed_nodes, &levels);
+                // match top_sort_res {
+                //     Result::Ok(v) => {
+                //         top_sorted_nodes = v;
+                //     }
+                //     Err(_) => {
+                //         log::error!("Cycle detected!");
+                //         assert!(false);
+                //     }
+                // }
 
                 log::info!(
                     "Topological order after local mixing iteration: {:?}",
@@ -2112,6 +2229,7 @@ mod tests {
                 &mut path,
                 &skeleton_graph,
                 Direction::Outgoing,
+                &mut HashSet::new(),
             );
 
             // visited path will always contain `target` even if no path exists from source to target. Here we remove it.
@@ -2150,10 +2268,16 @@ mod tests {
         while iter < 10 {
             let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
             let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&circuit);
-            let graph_neighbors = graph_neighbors(&skeleton_graph);
-            let levels = graph_level(&skeleton_graph, &graph_neighbors);
-            let convex_subgraph =
-                find_convex_fast(&skeleton_graph, &levels, ell_out, max_iterations, &mut rng);
+            let graph_neighbors = graph_neighbors(&skeleton_graph, &mut HashSet::new());
+            let levels = graph_level(&skeleton_graph, &graph_neighbors, &HashSet::new());
+            let convex_subgraph = find_convex_fast(
+                &skeleton_graph,
+                &levels,
+                ell_out,
+                max_iterations,
+                &mut rng,
+                &mut HashSet::new(),
+            );
 
             match convex_subgraph {
                 Some((start_node, convex_subgraph)) => {
@@ -2204,6 +2328,7 @@ mod tests {
                 &mut vec![],
                 graph,
                 Direction::Incoming,
+                &mut HashSet::new(),
             );
         }
         return all_preds;
@@ -2222,11 +2347,17 @@ mod tests {
         while iter < 100 {
             let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
             let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&circuit);
-            let graph_neighbors = graph_neighbors(&skeleton_graph);
-            let levels = graph_level(&skeleton_graph, &graph_neighbors);
+            let graph_neighbors = graph_neighbors(&skeleton_graph, &mut HashSet::new());
+            let levels = graph_level(&skeleton_graph, &graph_neighbors, &HashSet::new());
 
-            let convex_subgraph =
-                find_convex_fast(&skeleton_graph, &levels, ell_out, max_iterations, &mut rng);
+            let convex_subgraph = find_convex_fast(
+                &skeleton_graph,
+                &levels,
+                ell_out,
+                max_iterations,
+                &mut rng,
+                &mut HashSet::new(),
+            );
 
             match convex_subgraph {
                 Some((start_node, convex_subgraph)) => {
@@ -2313,15 +2444,22 @@ mod tests {
         let mut rng = ChaCha8Rng::from_entropy();
         let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
         let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&circuit);
-        let graph_neighbors = graph_neighbors(&skeleton_graph);
-        let levels = graph_level(&skeleton_graph, &graph_neighbors);
+        let graph_neighbors = graph_neighbors(&skeleton_graph, &mut HashSet::new());
+        let levels = graph_level(&skeleton_graph, &graph_neighbors, &HashSet::new());
 
         let mut stats = Stats::new();
 
         for _ in 0..10 {
             let now = std::time::Instant::now();
-            let _ = find_convex_fast(&skeleton_graph, &levels, ell_out, max_iterations, &mut rng)
-                .unwrap();
+            let _ = find_convex_fast(
+                &skeleton_graph,
+                &levels,
+                ell_out,
+                max_iterations,
+                &mut rng,
+                &mut HashSet::new(),
+            )
+            .unwrap();
             stats.add_sample(now.elapsed().as_secs_f64());
         }
 
@@ -2337,7 +2475,11 @@ mod tests {
         let mut rng = thread_rng();
         let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
         let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&circuit);
-        let level = graph_level(&skeleton_graph, &graph_neighbors(&skeleton_graph));
+        let level = graph_level(
+            &skeleton_graph,
+            &graph_neighbors(&skeleton_graph, &mut HashSet::new()),
+            &HashSet::new(),
+        );
 
         let mut stats = Stats::new();
 
@@ -2347,7 +2489,13 @@ mod tests {
             convex_set.insert(start_node);
             let now = std::time::Instant::now();
             // let _ = trialll(&skeleton_graph, ell_out, max_iterations, &mut rng).unwrap();
-            let _ = blah(ell_out, &mut convex_set, &skeleton_graph, &level);
+            let _ = blah(
+                ell_out,
+                &mut convex_set,
+                &skeleton_graph,
+                &level,
+                &mut HashSet::new(),
+            );
             stats.add_sample(now.elapsed().as_secs_f64());
         }
 
@@ -2364,12 +2512,12 @@ mod tests {
         let (original_circuit, _) =
             sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
         let (_, _, graph, _, _, _, _) = prepare_circuit(&original_circuit);
-        let graph_neighbors = graph_neighbors(&graph);
+        let graph_neighbors = graph_neighbors(&graph, &mut HashSet::new());
 
         let n = 10;
         let start = std::time::Instant::now();
         for _ in 0..n {
-            graph_level(&graph, &graph_neighbors);
+            graph_level(&graph, &graph_neighbors, &HashSet::new());
         }
         dbg!(start.elapsed() / n);
     }
@@ -2390,7 +2538,12 @@ mod tests {
         for _ in 0..n {
             let source = NodeIndex::from(rng.gen_range(0..gates as _));
             let start = std::time::Instant::now();
-            dfs_fast(&graph, vec![source], Direction::Incoming);
+            dfs_fast(
+                &graph,
+                vec![source],
+                Direction::Incoming,
+                &mut HashSet::new(),
+            );
             t += start.elapsed();
         }
         println!("Find predecessors: {:?}", t / n);
@@ -2399,7 +2552,12 @@ mod tests {
         for _ in 0..n {
             let source = NodeIndex::from(rng.gen_range(0..gates as _));
             let start = std::time::Instant::now();
-            dfs_fast(&graph, vec![source], Direction::Outgoing);
+            dfs_fast(
+                &graph,
+                vec![source],
+                Direction::Outgoing,
+                &mut HashSet::new(),
+            );
             t += start.elapsed();
         }
         println!("Find successors: {:?}", t / n);
@@ -2407,13 +2565,23 @@ mod tests {
         for _ in 0..10 {
             let start = NodeIndex::from(rng.gen_range(0..gates as _));
             assert_eq!(
-                dfs_fast(&graph, vec![start], Direction::Outgoing),
+                dfs_fast(
+                    &graph,
+                    vec![start],
+                    Direction::Outgoing,
+                    &mut HashSet::new()
+                ),
                 Dfs::from_parts(vec![start], graph.visit_map())
                     .iter(&graph)
                     .collect()
             );
             assert_eq!(
-                dfs_fast(&graph, vec![start], Direction::Incoming),
+                dfs_fast(
+                    &graph,
+                    vec![start],
+                    Direction::Incoming,
+                    &mut HashSet::new()
+                ),
                 Dfs::from_parts(vec![start], graph.visit_map())
                     .iter(Reversed(&graph))
                     .collect()
