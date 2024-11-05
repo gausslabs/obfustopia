@@ -1881,26 +1881,27 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
     // Remove edges
     let mut real_removed_edge_targets = HashSet::new();
-    timed!("Removing edges", {
-        let to_remove_edges_with_source_target_node_index: Vec<(
-            EdgeIndex,
-            (NodeIndex, NodeIndex),
-        )> = remove_edges
-            .par_iter()
-            .filter_map(|edge| match skeleton_graph.find_edge(edge.0, edge.1) {
-                Some(e) => Some((e, *edge)),
-                None => None,
-            })
-            .collect();
+    let to_remove_edges_with_source_target_node_index: Vec<(EdgeIndex, (NodeIndex, NodeIndex))> =
+        timed!("Find edges to remove", {
+            remove_edges
+                .par_iter()
+                .filter_map(|edge| match skeleton_graph.find_edge(edge.0, edge.1) {
+                    Some(e) => Some((e, *edge)),
+                    None => None,
+                })
+                .collect();
+        });
 
+    timed!(
+        "Remove edges",
         to_remove_edges_with_source_target_node_index
             .into_iter()
             .for_each(|(edge_index, (source_index, target_index))| {
                 real_removed_edge_targets.insert(source_index);
                 real_removed_edge_targets.insert(target_index);
                 skeleton_graph.remove_edge(edge_index);
-            });
-    });
+            })
+    );
 
     // Add new edges
     timed!(
