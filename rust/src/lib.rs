@@ -823,6 +823,17 @@ fn find_all_successors(
     return successors;
 }
 
+pub fn toposort_with_cached_graph_neighbours(
+    skeleton_graph: &Graph<usize, usize>,
+    graph_neighbors: &[[HashSet<NodeIndex>; 2]],
+) -> Vec<NodeIndex> {
+    let levels = graph_level_single_threaded(&skeleton_graph, &graph_neighbors);
+    let mut node_indices = skeleton_graph.node_indices().into_iter().collect_vec();
+
+    node_indices.par_sort_by(|a, b| levels[a.index()].cmp(&levels[b.index()]));
+    node_indices
+}
+
 fn graph_neighbors(graph: &Graph<usize, usize>) -> Vec<[HashSet<NodeIndex>; 2]> {
     (0..graph.node_count() as _)
         .into_par_iter()
@@ -848,6 +859,44 @@ fn update_graph_neighbors(
     });
 }
 
+/// Implements Kahn's algorithm. Instead of the original graph it uses cached incoming and outgoing edges per edge
+fn graph_level_single_threaded(
+    graph: &Graph<usize, usize>,
+    graph_neighbors: &[[HashSet<NodeIndex>; 2]],
+) -> Vec<usize> {
+    let mut stack = Vec::new();
+    let mut degree = graph_neighbors
+        .iter()
+        .enumerate()
+        .map(|(n, [incomings, _])| {
+            if incomings.is_empty() {
+                stack.push(NodeIndex::from(n as u32));
+            }
+            (incomings.len(), 0)
+        })
+        .collect::<Vec<_>>();
+    let mut level = vec![0; graph.node_count()];
+    let mut next = None;
+    while let Some(curr) = next.take().or_else(|| stack.pop()) {
+        let curr_level = level[curr.index()];
+        graph_neighbors[curr.index()][1].iter().for_each(|succ| {
+            let (succ_in_degree, succ_level) = &mut degree[succ.index()];
+
+            *succ_in_degree -= 1;
+            *succ_level = std::cmp::max(curr_level + 1, *succ_level);
+
+            level[succ.index()] = *succ_level;
+
+            if *succ_in_degree == 0 {
+                stack.push(*succ);
+            }
+        });
+    }
+
+    level
+}
+
+/// Implements Kahn's algorithm but splits the work across multiple cores via steal method.
 fn graph_level(
     graph: &Graph<usize, usize>,
     graph_neighbors: &[[HashSet<NodeIndex>; 2]],
@@ -883,7 +932,7 @@ fn graph_level(
                     (succ_degree == 1).then_some(*succ)
                 })
                 .collect_vec();
-            next = succs.pop();
+            // next = succs.pop();
             if !succs.is_empty() {
                 stack.lock().unwrap().extend(succs);
             }
@@ -1879,6 +1928,45 @@ pub fn run_local_mixing<R: Send + Sync + SeedableRng + RngCore>(
     if success {
         if debug || to_checkpoint {
             let original_circuit = original_circuit.unwrap();
+
+            // Use cached incoming and outgoing edges DS to topologically sort the nodes
+            // {
+            //     let top_sorted_nodes =
+            //         toposort_with_cached_graph_neighbours(skeleton_graph, &graph_neighbors);
+
+            //     {
+            //         for index in 0..top_sorted_nodes.len() {
+            //             let node = top_sorted_nodes[index];
+
+            //             let imm_succ = skeleton_graph
+            //                 .neighbors_directed(node, Direction::Outgoing)
+            //                 .collect_vec();
+            //             let all_successors =
+            //                 dfs_fast(&skeleton_graph, imm_succ, Direction::Outgoing);
+            //             for prev_index in 0..index {
+            //                 assert!(!all_successors.contains(&top_sorted_nodes[prev_index]));
+            //             }
+            //         }
+            //     }
+            //     let mixed_circuit = Circuit::from_top_sorted_nodes(
+            //         &top_sorted_nodes,
+            //         &skeleton_graph,
+            //         &gate_map,
+            //         original_circuit.n(),
+            //     );
+
+            //     let (is_correct, diff_indices) =
+            //         check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, rng);
+            //     if !is_correct {
+            //         log::error!(
+            //             "[Error] (Failed equivalence check at) {tag}. Different at indices {:?}",
+            //             diff_indices
+            //         );
+            //         assert!(false);
+            //     }
+
+            //     cb(mixed_circuit);
+            // }
 
             let top_sort_res = timed!(
                 "Topological sort after local mixing",
