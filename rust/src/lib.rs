@@ -548,8 +548,18 @@ pub fn toposort_after_removed_nodes(
         .filter(|node| !removed_nodes.contains(node))
         .collect_vec();
 
+    for rm in removed_nodes {
+        assert!(level[rm.index()] == 0);
+    }
+
     node_indices.par_sort_by(|a, b| level[a.index()].cmp(&level[b.index()]));
     node_indices
+
+    // toposort(skeleton_graph, None)
+    //     .unwrap()
+    //     .into_iter()
+    //     .filter(|n| !removed_nodes.contains(n))
+    //     .collect_vec()
 }
 
 fn dfs_fast(
@@ -885,12 +895,16 @@ fn graph_neighbors(
     (0..graph.node_count() as _)
         .into_par_iter()
         .map(|n| {
-            [Direction::Incoming, Direction::Outgoing].map(|dir| {
-                graph
-                    .neighbors_directed(NodeIndex::from(n), dir)
-                    .filter(|node| !removed_nodes.contains(node))
-                    .collect()
-            })
+            if removed_nodes.contains(&NodeIndex::from(n)) {
+                [HashSet::new(), HashSet::new()]
+            } else {
+                [Direction::Incoming, Direction::Outgoing].map(|dir| {
+                    graph
+                        .neighbors_directed(NodeIndex::from(n), dir)
+                        .filter(|node| !removed_nodes.contains(node))
+                        .collect()
+                })
+            }
         })
         .collect()
 }
@@ -1925,42 +1939,42 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         )
     );
 
-    // let iii = izip!(
-    //     0..,
-    //     graph_neighbours,
-    //     &crate::graph_neighbors(skeleton_graph)
-    // )
-    // .filter_map(|(idx, a, b)| (a != b).then_some(idx))
-    // .collect_vec();
-    // if !iii.is_empty() {
-    //     println!("diff: {iii:?}");
-    //     println!(
-    //         "cout_convex_subset: {:?}",
-    //         cout_convex_subset.iter().copied().collect_vec()
-    //     );
-    //     println!(
-    //         "cin_nodes: {:?}",
-    //         cin_nodes
-    //             .iter()
-    //             .take(ell_in - ell_out)
-    //             .copied()
-    //             .collect_vec()
-    //     );
-    //     println!("c_out_imm_successors: {:?}", c_out_imm_successors);
-    //     println!(
-    //         "new_edges targets: {:?}",
-    //         new_edges
-    //             .iter()
-    //             .map(|e| e.1)
-    //             .filter(|target| target.index() < skeleton_graph.node_count())
-    //             .collect_vec()
-    //     );
-    //     println!(
-    //         "real_removed_edge_targets: {:?}",
-    //         real_removed_edge_targets.iter().copied(),
-    //     );
-    //     panic!("");
-    // }
+    let iii = izip!(
+        0..,
+        graph_neighbours,
+        &crate::graph_neighbors(skeleton_graph, removed_nodes)
+    )
+    .filter_map(|(idx, a, b)| (a != b).then_some(idx))
+    .collect_vec();
+    if !iii.is_empty() {
+        println!("diff: {iii:?}");
+        println!(
+            "cout_convex_subset: {:?}",
+            cout_convex_subset.iter().copied().collect_vec()
+        );
+        println!(
+            "cin_nodes: {:?}",
+            cin_nodes
+                .iter()
+                .take(ell_in - ell_out)
+                .copied()
+                .collect_vec()
+        );
+        println!("c_out_imm_successors: {:?}", c_out_imm_successors);
+        println!(
+            "new_edges targets: {:?}",
+            new_edges
+                .iter()
+                .map(|e| e.1)
+                .filter(|target| target.index() < skeleton_graph.node_count())
+                .collect_vec()
+        );
+        println!(
+            "real_removed_edge_targets: {:?}",
+            real_removed_edge_targets.iter().copied(),
+        );
+        panic!("");
+    }
 
     // update gate_id to node_index map
     timed!(
@@ -2038,10 +2052,11 @@ pub fn run_local_mixing<R: Send + Sync + SeedableRng + RngCore>(
             });
             // match top_sort_res {
             // Result::Ok(top_sorted_nodes) => {
-            #[cfg(feature = "trace")]
+            // #[cfg(feature = "trace")]
             log::trace!(
                 "Top sort after local mixing: {:?}",
-                node_indices_to_gate_ids(top_sorted_nodes.iter(), &skeleton_graph)
+                // node_indices_to_gate_ids(top_sorted_nodes.iter(), &skeleton_graph)
+                &top_sorted_nodes
             );
 
             let mixed_circuit = Circuit::from_top_sorted_nodes(
@@ -2058,6 +2073,15 @@ pub fn run_local_mixing<R: Send + Sync + SeedableRng + RngCore>(
                     "[Error] (Failed equivalence check at) {tag}. Different at indices {:?}",
                     diff_indices
                 );
+
+                match toposort(skeleton_graph.deref(), None) {
+                    Ok(_) => {
+                        log::error!("Top sort did not fail");
+                    }
+                    Err(e) => {
+                        log::error!("Top sort also fails with {:?}", e);
+                    }
+                }
                 assert!(false);
             }
 

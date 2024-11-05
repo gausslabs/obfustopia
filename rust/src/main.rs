@@ -82,7 +82,7 @@ impl ObfuscationConfig {
     }
 
     fn default_strategy1() -> Self {
-        ObfuscationConfig::new_with_strategy1(64, 400, 10000, 1000000, 1000)
+        ObfuscationConfig::new_with_strategy1(64, 500, 10000, 1000000, 1000)
     }
 
     fn default_strategy2() -> Self {
