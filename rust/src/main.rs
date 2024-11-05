@@ -4,7 +4,7 @@ use rand_chacha::ChaCha8Rng;
 use rust::{
     check_probabilisitic_equivalence,
     circuit::{BaseGate, Circuit},
-    graph_level, prepare_circuit, run_local_mixing, toposort_after_removed_nodes,
+    graph_level, prepare_circuit, run_local_mixing, toposort_with_cached_graph_neighbours,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -221,9 +221,11 @@ fn run_strategy1(job: &mut ObfuscationJob, job_path: String, debug: bool) {
     }
 
     {
-        let levels = graph_level(&skeleton_graph, &graph_neighbours, &removed_nodes);
-        let top_sorted_nodes =
-            toposort_after_removed_nodes(&skeleton_graph, &removed_nodes, &levels);
+        let top_sorted_nodes = toposort_with_cached_graph_neighbours(
+            &skeleton_graph,
+            &graph_neighbours,
+            &removed_nodes,
+        );
         job.curr_total_steps = job.config.total_steps;
         job.curr_circuit = Circuit::from_top_sorted_nodes(
             &top_sorted_nodes,
@@ -302,9 +304,11 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
         }
 
         {
-            let levels = graph_level(&skeleton_graph, &graph_neighbours, &removed_nodes);
-            let top_sorted_nodes =
-                toposort_after_removed_nodes(&skeleton_graph, &removed_nodes, &levels);
+            let top_sorted_nodes = toposort_with_cached_graph_neighbours(
+                &skeleton_graph,
+                &graph_neighbours,
+                &removed_nodes,
+            );
             job.curr_inflationary_stage_steps = job.config.inflationary_stage_steps;
             job.curr_circuit = Circuit::from_top_sorted_nodes(
                 &top_sorted_nodes,
@@ -366,9 +370,11 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
         }
 
         {
-            let levels = graph_level(&skeleton_graph, &graph_neighbours, &removed_nodes);
-            let top_sorted_nodes =
-                toposort_after_removed_nodes(&skeleton_graph, &removed_nodes, &levels);
+            let top_sorted_nodes = toposort_with_cached_graph_neighbours(
+                &skeleton_graph,
+                &graph_neighbours,
+                &removed_nodes,
+            );
             job.curr_kneading_stage_steps = job.config.kneading_stage_steps;
             job.curr_circuit = Circuit::from_top_sorted_nodes(
                 &top_sorted_nodes,

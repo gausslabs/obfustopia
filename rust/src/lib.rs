@@ -537,31 +537,6 @@ fn find_replacement_circuit_fast<R: Send + Sync + RngCore + SeedableRng>(
     }
 }
 
-pub fn toposort_after_removed_nodes(
-    skeleton_graph: &Graph<usize, usize>,
-    removed_nodes: &HashSet<NodeIndex>,
-    level: &[usize],
-) -> Vec<NodeIndex> {
-    let mut node_indices = skeleton_graph
-        .node_indices()
-        .into_iter()
-        .filter(|node| !removed_nodes.contains(node))
-        .collect_vec();
-
-    for rm in removed_nodes {
-        assert!(level[rm.index()] == 0);
-    }
-
-    node_indices.par_sort_by(|a, b| level[a.index()].cmp(&level[b.index()]));
-    node_indices
-
-    // toposort(skeleton_graph, None)
-    //     .unwrap()
-    //     .into_iter()
-    //     .filter(|n| !removed_nodes.contains(n))
-    //     .collect_vec()
-}
-
 fn dfs_fast(
     graph: &Graph<usize, usize>,
     sources: Vec<NodeIndex>,
@@ -888,6 +863,21 @@ fn find_all_successors(
     return successors;
 }
 
+pub fn toposort_with_cached_graph_neighbours(
+    skeleton_graph: &Graph<usize, usize>,
+    graph_neighbors: &[[HashSet<NodeIndex>; 2]],
+    removed_nodes: &HashSet<NodeIndex>,
+) -> Vec<NodeIndex> {
+    let levels = graph_level_single_threaded(&skeleton_graph, &graph_neighbors, removed_nodes);
+    let mut node_indices = skeleton_graph
+        .node_indices()
+        .into_iter()
+        .filter(|node| !removed_nodes.contains(node))
+        .collect_vec();
+    node_indices.par_sort_by(|a, b| levels[a.index()].cmp(&levels[b.index()]));
+    node_indices
+}
+
 fn graph_neighbors(
     graph: &Graph<usize, usize>,
     removed_nodes: &HashSet<NodeIndex>,
@@ -912,11 +902,11 @@ fn graph_neighbors(
 fn update_graph_neighbors(
     graph: &Graph<usize, usize>,
     in_degree: &mut Vec<[HashSet<NodeIndex>; 2]>,
-    removal: &HashSet<NodeIndex>,
+    to_remove_nodes: &HashSet<NodeIndex>,
     incoming: HashSet<NodeIndex>,
     removed_nodes: &HashSet<NodeIndex>,
 ) {
-    removal.iter().for_each(|n| {
+    to_remove_nodes.iter().for_each(|n| {
         let incoming = &mut in_degree[n.index()][0];
         *incoming = HashSet::new();
         let outgoing = &mut in_degree[n.index()][1];
@@ -927,24 +917,53 @@ fn update_graph_neighbors(
     let in_degree_slice = UnsafeSlice::new(in_degree);
     incoming.into_par_iter().for_each(|n| unsafe {
         assert!(!removed_nodes.contains(&n));
-        if removed_nodes.contains(&n) {
-            in_degree_slice.update(n.index(), |[incoming, outgoing]| {
-                *incoming = HashSet::new();
-                *outgoing = HashSet::new();
-            })
-        } else {
-            in_degree_slice.update(n.index(), |[incoming, outgoing]| {
-                *incoming = graph
-                    .neighbors_directed(n, Direction::Incoming)
-                    .filter(|node| !removed_nodes.contains(node))
-                    .collect();
-                *outgoing = graph
-                    .neighbors_directed(n, Direction::Outgoing)
-                    .filter(|node| !removed_nodes.contains(node))
-                    .collect()
-            })
-        }
+        in_degree_slice.update(n.index(), |[incoming, outgoing]| {
+            *incoming = graph
+                .neighbors_directed(n, Direction::Incoming)
+                .filter(|node| !removed_nodes.contains(node))
+                .collect();
+            *outgoing = graph
+                .neighbors_directed(n, Direction::Outgoing)
+                .filter(|node| !removed_nodes.contains(node))
+                .collect()
+        })
     });
+}
+
+/// Implements Kahn's algorithm. Instead of the original graph it uses cached incoming and outgoing edges per edge
+fn graph_level_single_threaded(
+    graph: &Graph<usize, usize>,
+    graph_neighbors: &[[HashSet<NodeIndex>; 2]],
+    removed_nodes: &HashSet<NodeIndex>,
+) -> Vec<usize> {
+    let mut stack = Vec::new();
+    let mut degree = graph_neighbors
+        .iter()
+        .enumerate()
+        .map(|(n, [incomings, _])| {
+            let node = NodeIndex::from(n as u32);
+            if incomings.is_empty() && !removed_nodes.contains(&node) {
+                stack.push(node);
+            }
+            (incomings.len(), 0)
+        })
+        .collect::<Vec<_>>();
+    let mut level = vec![0; graph.node_count()];
+    let mut next = None;
+    while let Some(curr) = next.take().or_else(|| stack.pop()) {
+        let curr_level = level[curr.index()];
+        graph_neighbors[curr.index()][1].iter().for_each(|succ| {
+            assert!(!removed_nodes.contains(succ));
+            let (succ_in_degree, succ_level) = &mut degree[succ.index()];
+            *succ_in_degree -= 1;
+            *succ_level = std::cmp::max(curr_level + 1, *succ_level);
+            level[succ.index()] = *succ_level;
+            if *succ_in_degree == 0 {
+                stack.push(*succ);
+            }
+        });
+    }
+    level
 }
 
 pub fn graph_level(
@@ -961,14 +980,14 @@ pub fn graph_level(
                 stack.lock().unwrap().push(NodeIndex::from(n as u32));
             }
 
-            for i in incomings.iter() {
-                assert!(
-                    !removed_nodes.contains(i),
-                    "[graph_level] Removed node {} found in incoming neighbours of node {}",
-                    i.index(),
-                    n
-                );
-            }
+            // for i in incomings.iter() {
+            //     assert!(
+            //         !removed_nodes.contains(i),
+            //         "[graph_level] Removed node {} found in incoming neighbours of node {}",
+            //         i.index(),
+            //         n
+            //     );
+            // }
 
             return Some((AtomicUsize::new(incomings.len()), AtomicUsize::new(0)));
         })
@@ -995,7 +1014,7 @@ pub fn graph_level(
                     (succ_degree == 1).then_some(*succ)
                 })
                 .collect_vec();
-            next = succs.pop();
+            // next = succs.pop();
             if !succs.is_empty() {
                 stack.lock().unwrap().extend(succs);
             }
@@ -1897,6 +1916,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         // Index of removed node is take over by the node that has the last index. Here we remove \ell^out nodes.
         // As long as \ell^out <= \ell^in (notice that C^in gates are added before removing gates of C^out) none of
         // pre-existing nodes we replace the removed node and hence we wouldn't incorrectly delete some node.
+
         // for node in cout_convex_subset.iter() {
         //     skeleton_graph.remove_node(*node).unwrap();
         // }
@@ -1905,19 +1925,19 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         }
     );
 
-    log::info!("All removed nodes: {:?}", removed_nodes);
-    log::info!("@@@ C^out nodes: {:?} @@@", &cout_convex_subset);
-    log::info!("@@@ C^in nodes: {:?} @@@", &cin_nodes);
-    log::info!("@@@ C^out imm preds: {:?} @@@", &c_out_imm_predecessors);
-    log::info!("@@@ C^out imm succs: {:?} @@@", &c_out_imm_successors);
-    log::info!(
-        "@@@ New edges nodes: {:?} @@@",
-        &new_edges.iter().flat_map(|e| [e.0, e.1]).collect_vec()
-    );
-    log::info!(
-        "@@@ Removed edges nodes: {:?} @@@",
-        &real_removed_edge_targets
-    );
+    // log::info!("All removed nodes: {:?}", removed_nodes);
+    // log::info!("@@@ C^out nodes: {:?} @@@", &cout_convex_subset);
+    // log::info!("@@@ C^in nodes: {:?} @@@", &cin_nodes);
+    // log::info!("@@@ C^out imm preds: {:?} @@@", &c_out_imm_predecessors);
+    // log::info!("@@@ C^out imm succs: {:?} @@@", &c_out_imm_successors);
+    // log::info!(
+    //     "@@@ New edges nodes: {:?} @@@",
+    //     &new_edges.iter().flat_map(|e| [e.0, e.1]).collect_vec()
+    // );
+    // log::info!(
+    //     "@@@ Removed edges nodes: {:?} @@@",
+    //     &real_removed_edge_targets
+    // );
 
     timed!(
         "Update graph neighbours",
@@ -1939,42 +1959,42 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         )
     );
 
-    let iii = izip!(
-        0..,
-        graph_neighbours,
-        &crate::graph_neighbors(skeleton_graph, removed_nodes)
-    )
-    .filter_map(|(idx, a, b)| (a != b).then_some(idx))
-    .collect_vec();
-    if !iii.is_empty() {
-        println!("diff: {iii:?}");
-        println!(
-            "cout_convex_subset: {:?}",
-            cout_convex_subset.iter().copied().collect_vec()
-        );
-        println!(
-            "cin_nodes: {:?}",
-            cin_nodes
-                .iter()
-                .take(ell_in - ell_out)
-                .copied()
-                .collect_vec()
-        );
-        println!("c_out_imm_successors: {:?}", c_out_imm_successors);
-        println!(
-            "new_edges targets: {:?}",
-            new_edges
-                .iter()
-                .map(|e| e.1)
-                .filter(|target| target.index() < skeleton_graph.node_count())
-                .collect_vec()
-        );
-        println!(
-            "real_removed_edge_targets: {:?}",
-            real_removed_edge_targets.iter().copied(),
-        );
-        panic!("");
-    }
+    // let iii = izip!(
+    //     0..,
+    //     graph_neighbours,
+    //     &crate::graph_neighbors(skeleton_graph, removed_nodes)
+    // )
+    // .filter_map(|(idx, a, b)| (a != b).then_some(idx))
+    // .collect_vec();
+    // if !iii.is_empty() {
+    //     println!("diff: {iii:?}");
+    //     println!(
+    //         "cout_convex_subset: {:?}",
+    //         cout_convex_subset.iter().copied().collect_vec()
+    //     );
+    //     println!(
+    //         "cin_nodes: {:?}",
+    //         cin_nodes
+    //             .iter()
+    //             .take(ell_in - ell_out)
+    //             .copied()
+    //             .collect_vec()
+    //     );
+    //     println!("c_out_imm_successors: {:?}", c_out_imm_successors);
+    //     println!(
+    //         "new_edges targets: {:?}",
+    //         new_edges
+    //             .iter()
+    //             .map(|e| e.1)
+    //             .filter(|target| target.index() < skeleton_graph.node_count())
+    //             .collect_vec()
+    //     );
+    //     println!(
+    //         "real_removed_edge_targets: {:?}",
+    //         real_removed_edge_targets.iter().copied(),
+    //     );
+    //     panic!("");
+    // }
 
     // update gate_id to node_index map
     timed!(
@@ -2047,12 +2067,14 @@ pub fn run_local_mixing<R: Send + Sync + SeedableRng + RngCore>(
             let original_circuit = original_circuit.unwrap();
 
             let top_sorted_nodes = timed!("Topological sort after local mixing", {
-                let levels = graph_level(&skeleton_graph, graph_neighbors, removed_nodes);
-                toposort_after_removed_nodes(skeleton_graph.deref(), &removed_nodes, &levels)
+                toposort_with_cached_graph_neighbours(
+                    skeleton_graph,
+                    graph_neighbors,
+                    removed_nodes,
+                )
             });
-            // match top_sort_res {
-            // Result::Ok(top_sorted_nodes) => {
-            // #[cfg(feature = "trace")]
+
+            #[cfg(feature = "trace")]
             log::trace!(
                 "Top sort after local mixing: {:?}",
                 // node_indices_to_gate_ids(top_sorted_nodes.iter(), &skeleton_graph)
@@ -2086,12 +2108,6 @@ pub fn run_local_mixing<R: Send + Sync + SeedableRng + RngCore>(
             }
 
             cb(mixed_circuit);
-            // }
-            // Err(_) => {
-            //     log::error!("Cycle detected!");
-            //     assert!(false);
-            // }
-            // }
         }
     }
 
@@ -2233,18 +2249,11 @@ mod tests {
                 // println!("Original circuit: {:?}", original_circuit_graphviz);
                 // println!("Mixed circuit: {:?}", mixed_circuit_graphviz);
 
-                let levels = graph_level(&skeleton_graph, &graph_neighbors, &removed_nodes);
-                let top_sorted_nodes =
-                    toposort_after_removed_nodes(&skeleton_graph, &removed_nodes, &levels);
-                // match top_sort_res {
-                //     Result::Ok(v) => {
-                //         top_sorted_nodes = v;
-                //     }
-                //     Err(_) => {
-                //         log::error!("Cycle detected!");
-                //         assert!(false);
-                //     }
-                // }
+                let top_sorted_nodes = toposort_with_cached_graph_neighbours(
+                    &skeleton_graph,
+                    &graph_neighbors,
+                    &removed_nodes,
+                );
 
                 log::info!(
                     "Topological order after local mixing iteration: {:?}",
