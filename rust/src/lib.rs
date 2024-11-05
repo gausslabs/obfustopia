@@ -1124,6 +1124,7 @@ pub fn prepare_circuit<G: Gate>(
     HashMap<usize, NodeIndex>,
     HashMap<usize, G>,
     Vec<[HashSet<NodeIndex>; 2]>,
+    HashSet<(usize, usize)>,
     usize,
 )
 where
@@ -1180,6 +1181,9 @@ where
         direct_connections_map.insert(circuit.gates()[index].id(), conn);
     }
 
+    // edge collection
+    let mut active_edges_with_gateids = HashSet::new();
+
     // create skeleton graph with transitive connections
     let mut skeleton = Graph::<usize, usize>::new();
     // add nodes with weights as ids
@@ -1188,15 +1192,17 @@ where
         .iter()
         .map(|g| skeleton.add_node(g.id()))
         .collect_vec();
-    let edges = transitive_connections
+    transitive_connections
         .iter()
         .enumerate()
-        .flat_map(|(i, set)| {
+        .for_each(|(i, set)| {
             // FIXME(Jay): Had to collect_vec due to lifetime issues
-            let v = set.iter().map(|j| (nodes[i], nodes[*j])).collect_vec();
-            v.into_iter()
+            set.iter().for_each(|j| {
+                active_edges_with_gateids
+                    .insert((circuit.gates()[i].id(), circuit.gates()[*j].id()));
+                skeleton.update_edge(nodes[i], nodes[*j], Default::default());
+            });
         });
-    skeleton.extend_with_edges(edges);
 
     // create gate id to gate map
     let mut gate_map = HashMap::new();
@@ -1221,6 +1227,7 @@ where
         gate_id_to_node_index_map,
         gate_map,
         graph_neighbours,
+        active_edges_with_gateids,
         latest_id,
     )
 }
@@ -1264,6 +1271,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     gate_id_to_node_index_map: &mut HashMap<usize, NodeIndex>,
     graph_neighbours: &mut Vec<[HashSet<NodeIndex>; 2]>,
     removed_nodes: &mut HashSet<NodeIndex>,
+    active_edges_with_gateids: &mut HashSet<(usize, usize)>,
     latest_id: &mut usize,
     max_replacement_iterations: usize,
     max_convex_iterations: usize,
@@ -1622,7 +1630,9 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
                             // Remove all transitive edges to nodes that gate_i has direct connections with.
                             for gate_id in pred_direct_collisions.intersection(gate_i_dc) {
-                                tc_remove.insert((pred_gate.id(), *gate_id));
+                                if active_edges_with_gateids.contains(&(pred_gate.id(), *gate_id)) {
+                                    tc_remove.insert((pred_gate.id(), *gate_id));
+                                }
                             }
 
                             // only add transitive edge from pred to gate i if there's no gate beetwen pred and gate i which collides with both.
@@ -1881,33 +1891,59 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
 
     // Remove edges
     let mut real_removed_edge_targets = HashSet::new();
-    let to_remove_edges_with_source_target_node_index: Vec<(EdgeIndex, (NodeIndex, NodeIndex))> =
-        timed!("Find edges to remove", {
-            remove_edges
-                .par_iter()
-                .filter_map(|edge| match skeleton_graph.find_edge(edge.0, edge.1) {
-                    Some(e) => Some((e, *edge)),
-                    None => None,
-                })
-                .collect();
-        });
-
     timed!(
-        "Remove edges",
-        to_remove_edges_with_source_target_node_index
-            .into_iter()
-            .for_each(|(edge_index, (source_index, target_index))| {
-                real_removed_edge_targets.insert(source_index);
-                real_removed_edge_targets.insert(target_index);
-                skeleton_graph.remove_edge(edge_index);
+        "Find indices and remove 'to be removed' edges in the graph",
+        {
+            remove_edges
+            .iter()
+            .for_each(|edge| match skeleton_graph.find_edge(edge.0, edge.1) {
+                Some(e) => {
+                    // let source_id = *skeleton_graph.node_weight(edge.0).unwrap();
+                    // let target_id = *skeleton_graph.node_weight(edge.1).unwrap();
+                    // log::trace!("Removing ({source_id}, {target_id})");
+                    // assert!(active_edges_with_gateids.contains(&(source_id, target_id)));
+                    real_removed_edge_targets.insert(edge.0);
+                    real_removed_edge_targets.insert(edge.1);
+
+                    skeleton_graph.remove_edge(e).unwrap();
+
+                },
+                None => {
+                    let source_id = *skeleton_graph.node_weight(edge.0).unwrap();
+                    let target_id = *skeleton_graph.node_weight(edge.1).unwrap();
+
+                    assert!(active_edges_with_gateids.contains(&(source_id, target_id)));
+                    assert!(false, "active_edges_with_gateids contains the edge {:?} but it does not exists in the skeleton graph" , (source_id, target_id));
+                }
             })
+        }
+    );
+
+    // Remove "removed edges" from active edges set
+    timed!(
+        "Remove removed edges from active edge set",
+        remove_edges.iter().for_each(|edge| {
+            let source_id = *skeleton_graph.node_weight(edge.0).unwrap();
+            let target_id = *skeleton_graph.node_weight(edge.1).unwrap();
+            assert!(active_edges_with_gateids.remove(&(source_id, target_id)));
+        })
     );
 
     // Add new edges
     timed!(
-        "Add new edges",
+        "Add new edges to graph",
         for edge in &new_edges {
-            skeleton_graph.add_edge(edge.0, edge.1, Default::default());
+            skeleton_graph.update_edge(edge.0, edge.1, Default::default());
+        }
+    );
+
+    // Add new edges to active edges set
+    timed!(
+        "Insert new edges to active edge set",
+        for edge in new_edges.iter() {
+            let source_id = *skeleton_graph.node_weight(edge.0).unwrap();
+            let target_id = *skeleton_graph.node_weight(edge.1).unwrap();
+            active_edges_with_gateids.insert((source_id, target_id));
         }
     );
 
@@ -1960,6 +1996,8 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         )
     );
 
+    // Checks whether graph neighbour updates are correct
+    //
     // let iii = izip!(
     //     0..,
     //     graph_neighbours,
@@ -1997,20 +2035,46 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     //     panic!("");
     // }
 
+    // Checks whether active edge list updates are correct
+    // {
+    //     let mut expected_active_edges = HashSet::new();
+    //     for edge in skeleton_graph.edge_references() {
+    //         let source_id = *skeleton_graph.node_weight(edge.source()).unwrap();
+    //         let target_id = *skeleton_graph.node_weight(edge.target()).unwrap();
+    //         expected_active_edges.insert((source_id, target_id));
+    //     }
+
+    //     let diff = expected_active_edges
+    //         .difference(active_edges_with_gateids)
+    //         .collect_vec();
+
+    //     if diff.len() != 0 {
+    //         log::trace!("@@ Active edge set did not update correctly @@");
+    //         for d in diff {
+    //             if expected_active_edges.contains(d) {
+    //                 log::trace!("   Active edge set does not contains expected edge {:?}", d);
+    //             } else {
+    //                 log::trace!("   Active edge set contains not-expected edge {:?}", d);
+    //             }
+    //         }
+    //         panic!();
+    //     }
+    // }
+
     // update gate_id to node_index map
-    timed!(
-        "Update gate_id_to_node_index_map",
-        for node in skeleton_graph.node_indices() {
-            if !removed_nodes.contains(&node) {
-                assert!(
-                    *gate_id_to_node_index_map
-                        .get(skeleton_graph.node_weight(node).unwrap())
-                        .unwrap()
-                        == node
-                );
-            }
-        }
-    );
+    // timed!(
+    //     "Update gate_id_to_node_index_map",
+    //     for node in skeleton_graph.node_indices() {
+    //         if !removed_nodes.contains(&node) {
+    //             assert!(
+    //                 *gate_id_to_node_index_map
+    //                     .get(skeleton_graph.node_weight(node).unwrap())
+    //                     .unwrap()
+    //                     == node
+    //             );
+    //         }
+    //     }
+    // );
 
     return true;
 }
@@ -2025,6 +2089,7 @@ pub fn run_local_mixing<R: Send + Sync + SeedableRng + RngCore>(
     gate_id_to_node_index_map: &mut HashMap<usize, NodeIndex>,
     graph_neighbors: &mut Vec<[HashSet<NodeIndex>; 2]>,
     removed_nodes: &mut HashSet<NodeIndex>,
+    active_edges_with_gateids: &mut HashSet<(usize, usize)>,
     latest_id: &mut usize,
     n: u8,
     rng: &mut R,
@@ -2054,6 +2119,7 @@ pub fn run_local_mixing<R: Send + Sync + SeedableRng + RngCore>(
         gate_id_to_node_index_map,
         graph_neighbors,
         removed_nodes,
+        active_edges_with_gateids,
         latest_id,
         max_replacement_iterations,
         max_convex_iterations,
@@ -2180,7 +2246,7 @@ mod tests {
         let (original_circuit, _) =
             sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
 
-        let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&original_circuit);
+        let (_, _, skeleton_graph, _, _, _, _, _) = prepare_circuit(&original_circuit);
         let mut top_sorted_nodes = toposort(&skeleton_graph, None).unwrap();
         let mut latest_id = 0;
         let mut gate_map = HashMap::new();
@@ -2201,6 +2267,7 @@ mod tests {
             mut gate_id_to_node_index_map,
             mut gate_map,
             mut graph_neighbors,
+            mut active_edges_with_gateids,
             mut latest_id,
         ) = prepare_circuit(&original_circuit);
 
@@ -2228,6 +2295,7 @@ mod tests {
                 &mut gate_id_to_node_index_map,
                 &mut graph_neighbors,
                 &mut removed_nodes,
+                &mut active_edges_with_gateids,
                 &mut latest_id,
                 max_replacement_iterations,
                 max_convex_iterations,
@@ -2286,7 +2354,7 @@ mod tests {
         let mut rng = thread_rng();
         for _ in 0..10 {
             let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-            let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&circuit);
+            let (_, _, skeleton_graph, _, _, _, _, _) = prepare_circuit(&circuit);
 
             let mut visited_with_path = HashSet::new();
             let mut visited = HashSet::new();
@@ -2341,7 +2409,7 @@ mod tests {
         let mut iter = 0;
         while iter < 10 {
             let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-            let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&circuit);
+            let (_, _, skeleton_graph, _, _, _, _, _) = prepare_circuit(&circuit);
             let graph_neighbors = graph_neighbors(&skeleton_graph, &mut HashSet::new());
             let levels = graph_level(&skeleton_graph, &graph_neighbors, &HashSet::new());
             let convex_subgraph = find_convex_fast(
@@ -2420,7 +2488,7 @@ mod tests {
         let mut iter = 0;
         while iter < 100 {
             let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-            let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&circuit);
+            let (_, _, skeleton_graph, _, _, _, _, _) = prepare_circuit(&circuit);
             let graph_neighbors = graph_neighbors(&skeleton_graph, &mut HashSet::new());
             let levels = graph_level(&skeleton_graph, &graph_neighbors, &HashSet::new());
 
@@ -2469,7 +2537,7 @@ mod tests {
         let mut rng = thread_rng();
         for _ in 0..10000 {
             let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-            let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&circuit);
+            let (_, _, skeleton_graph, _, _, _, _, _) = prepare_circuit(&circuit);
 
             let collisions_sets = circuit_to_collision_sets(&circuit);
             let is_wc = is_collisions_set_weakly_connected(&collisions_sets);
@@ -2517,7 +2585,7 @@ mod tests {
         let max_iterations = 10000;
         let mut rng = ChaCha8Rng::from_entropy();
         let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-        let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&circuit);
+        let (_, _, skeleton_graph, _, _, _, _, _) = prepare_circuit(&circuit);
         let graph_neighbors = graph_neighbors(&skeleton_graph, &mut HashSet::new());
         let levels = graph_level(&skeleton_graph, &graph_neighbors, &HashSet::new());
 
@@ -2548,7 +2616,7 @@ mod tests {
         let ell_out = 4;
         let mut rng = thread_rng();
         let (circuit, _) = sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-        let (_, _, skeleton_graph, _, _, _, _) = prepare_circuit(&circuit);
+        let (_, _, skeleton_graph, _, _, _, _, _) = prepare_circuit(&circuit);
         let level = graph_level(
             &skeleton_graph,
             &graph_neighbors(&skeleton_graph, &mut HashSet::new()),
@@ -2585,7 +2653,7 @@ mod tests {
 
         let (original_circuit, _) =
             sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-        let (_, _, graph, _, _, _, _) = prepare_circuit(&original_circuit);
+        let (_, _, graph, _, _, _, _, _) = prepare_circuit(&original_circuit);
         let graph_neighbors = graph_neighbors(&graph, &mut HashSet::new());
 
         let n = 10;
@@ -2605,7 +2673,7 @@ mod tests {
 
         let (original_circuit, _) =
             sample_circuit_with_base_gate::<2, u8, _>(gates, n, 1.0, &mut rng);
-        let (_, _, graph, _, _, _, _) = prepare_circuit(&original_circuit);
+        let (_, _, graph, _, _, _, _, _) = prepare_circuit(&original_circuit);
 
         let n = 30;
         let mut t = Duration::default();

@@ -82,7 +82,7 @@ impl ObfuscationConfig {
     }
 
     fn default_strategy1() -> Self {
-        ObfuscationConfig::new_with_strategy1(64, 500, 10000, 1000000, 1000)
+        ObfuscationConfig::new_with_strategy1(64, 400, 100_000, 10_000_000, 1000)
     }
 
     fn default_strategy2() -> Self {
@@ -175,6 +175,7 @@ fn run_strategy1(job: &mut ObfuscationJob, job_path: String, debug: bool) {
         mut gate_id_to_node_index_map,
         mut gate_map,
         mut graph_neighbours,
+        mut active_edges_with_gateids,
         mut latest_id,
     ) = prepare_circuit(&original_circuit);
 
@@ -201,6 +202,7 @@ fn run_strategy1(job: &mut ObfuscationJob, job_path: String, debug: bool) {
             &mut gate_id_to_node_index_map,
             &mut graph_neighbours,
             &mut removed_nodes,
+            &mut active_edges_with_gateids,
             &mut latest_id,
             job.config.n as u8,
             &mut rng,
@@ -259,6 +261,7 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
         mut gate_id_to_node_index_map,
         mut gate_map,
         mut graph_neighbours,
+        mut active_edges_with_gateids,
         mut latest_id,
     ) = prepare_circuit(&original_circuit);
 
@@ -284,6 +287,7 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
                 &mut gate_id_to_node_index_map,
                 &mut graph_neighbours,
                 &mut removed_nodes,
+                &mut active_edges_with_gateids,
                 &mut latest_id,
                 job.config.n as u8,
                 &mut rng,
@@ -349,6 +353,7 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
                 &mut gate_id_to_node_index_map,
                 &mut graph_neighbours,
                 &mut removed_nodes,
+                &mut active_edges_with_gateids,
                 &mut latest_id,
                 job.config.n as u8,
                 &mut rng,
