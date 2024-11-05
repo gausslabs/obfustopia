@@ -584,7 +584,12 @@ fn dfs_fast(
     visited
         .into_par_iter()
         .enumerate()
-        .flat_map(|(i, visited)| visited.into_inner().then(|| NodeIndex::from(i as u32)))
+        .flat_map(|(i, visited)| {
+            visited.into_inner().then(|| {
+                assert!(!removed_nodes.contains(&NodeIndex::from(i as u32)));
+                NodeIndex::from(i as u32)
+            })
+        })
         .collect()
 }
 
@@ -893,12 +898,21 @@ fn graph_neighbors(
 fn update_graph_neighbors(
     graph: &Graph<usize, usize>,
     in_degree: &mut Vec<[HashSet<NodeIndex>; 2]>,
+    removal: &HashSet<NodeIndex>,
     incoming: HashSet<NodeIndex>,
     removed_nodes: &HashSet<NodeIndex>,
 ) {
+    removal.iter().for_each(|n| {
+        let incoming = &mut in_degree[n.index()][0];
+        *incoming = HashSet::new();
+        let outgoing = &mut in_degree[n.index()][1];
+        *outgoing = HashSet::new();
+    });
+
     in_degree.resize_with(graph.node_count(), Default::default);
     let in_degree_slice = UnsafeSlice::new(in_degree);
     incoming.into_par_iter().for_each(|n| unsafe {
+        assert!(!removed_nodes.contains(&n));
         if removed_nodes.contains(&n) {
             in_degree_slice.update(n.index(), |[incoming, outgoing]| {
                 *incoming = HashSet::new();
@@ -934,7 +948,12 @@ pub fn graph_level(
             }
 
             for i in incomings.iter() {
-                assert!(!removed_nodes.contains(i));
+                assert!(
+                    !removed_nodes.contains(i),
+                    "[graph_level] Removed node {} found in incoming neighbours of node {}",
+                    i.index(),
+                    n
+                );
             }
 
             return Some((AtomicUsize::new(incomings.len()), AtomicUsize::new(0)));
@@ -949,8 +968,9 @@ pub fn graph_level(
             unsafe { level_slice.write(curr.index(), curr_level) };
             let mut succs = graph_neighbors[curr.index()][1]
                 .iter()
-                .filter(|node| !removed_nodes.contains(*node))
+                // .filter(|node| !removed_nodes.contains(*node))
                 .flat_map(|succ| {
+                    assert!(!removed_nodes.contains(succ));
                     let (succ_degree, succ_level) = &degree[succ.index()];
                     let succ_degree = succ_degree.fetch_sub(1, Relaxed);
                     succ_level
@@ -1871,13 +1891,28 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         }
     );
 
+    log::info!("All removed nodes: {:?}", removed_nodes);
+    log::info!("@@@ C^out nodes: {:?} @@@", &cout_convex_subset);
+    log::info!("@@@ C^in nodes: {:?} @@@", &cin_nodes);
+    log::info!("@@@ C^out imm preds: {:?} @@@", &c_out_imm_predecessors);
+    log::info!("@@@ C^out imm succs: {:?} @@@", &c_out_imm_successors);
+    log::info!(
+        "@@@ New edges nodes: {:?} @@@",
+        &new_edges.iter().flat_map(|e| [e.0, e.1]).collect_vec()
+    );
+    log::info!(
+        "@@@ Removed edges nodes: {:?} @@@",
+        &real_removed_edge_targets
+    );
+
     timed!(
         "Update graph neighbours",
         update_graph_neighbors(
             skeleton_graph,
             graph_neighbours,
+            &cout_convex_subset,
             chain![
-                cout_convex_subset.iter().copied(),
+                // cout_convex_subset.iter().copied(),
                 cin_nodes.iter().copied(),
                 c_out_imm_predecessors.iter().copied(),
                 c_out_imm_successors.iter().copied(),
@@ -1928,14 +1963,19 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     // }
 
     // update gate_id to node_index map
-    // timed!(
-    //     "Update gate_id_to_node_index_map",
-    //     for node in skeleton_graph.node_indices() {
-    //         assert!(gate_id_to_node_index_map
-    //             .insert(*skeleton_graph.node_weight(node).unwrap(), node)
-    //             .is_some());
-    //     }
-    // );
+    timed!(
+        "Update gate_id_to_node_index_map",
+        for node in skeleton_graph.node_indices() {
+            if !removed_nodes.contains(&node) {
+                assert!(
+                    *gate_id_to_node_index_map
+                        .get(skeleton_graph.node_weight(node).unwrap())
+                        .unwrap()
+                        == node
+                );
+            }
+        }
+    );
 
     return true;
 }
@@ -2108,8 +2148,8 @@ mod tests {
             gate_map.insert(g.id(), g.clone());
         });
 
-        let ell_out = 5;
-        let ell_in = 5;
+        let ell_out = 2;
+        let ell_in = 4;
         let max_convex_iterations = 1000usize;
         let max_replacement_iterations = 1000000usize;
 
@@ -2126,7 +2166,7 @@ mod tests {
         let mut removed_nodes = HashSet::new();
 
         let mut mixing_steps = 0;
-        let total_mixing_steps = 100;
+        let total_mixing_steps = 1000;
 
         while mixing_steps < total_mixing_steps {
             log::info!("#### Mixing step {mixing_steps} ####");
