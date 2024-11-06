@@ -2098,6 +2098,7 @@ pub fn run_local_mixing<R: Send + Sync + SeedableRng + RngCore>(
     max_convex_iterations: usize,
     max_replacement_iterations: usize,
     to_checkpoint: bool,
+    probabilitic_eq_check_iterations: usize,
     mut cb: impl FnMut(Circuit<BaseGate<2, u8>>),
     debug: bool,
 ) -> bool {
@@ -2155,8 +2156,12 @@ pub fn run_local_mixing<R: Send + Sync + SeedableRng + RngCore>(
                 original_circuit.n(),
             );
 
-            let (is_correct, diff_indices) =
-                check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, rng);
+            let (is_correct, diff_indices) = check_probabilisitic_equivalence(
+                &original_circuit,
+                &mixed_circuit,
+                probabilitic_eq_check_iterations,
+                rng,
+            );
             if !is_correct {
                 log::error!(
                     "[Error] (Failed equivalence check at) {tag}. Different at indices {:?}",
@@ -2185,6 +2190,7 @@ pub fn run_local_mixing<R: Send + Sync + SeedableRng + RngCore>(
 pub fn check_probabilisitic_equivalence<G, R: RngCore>(
     circuit0: &Circuit<G>,
     circuit1: &Circuit<G>,
+    iterations: usize,
     rng: &mut R,
 ) -> (bool, Vec<usize>)
 where
@@ -2193,7 +2199,10 @@ where
     assert_eq!(circuit0.n(), circuit1.n());
     let n = circuit0.n();
 
-    for value in rng.sample_iter(Uniform::new(0, 1u128 << n - 1)).take(10000) {
+    for value in rng
+        .sample_iter(Uniform::new(0, 1u128 << n))
+        .take(iterations)
+    {
         // for value in 0..1u128 << 16 {
         let mut inputs = vec![];
         for i in 0..n {
@@ -2335,8 +2344,12 @@ mod tests {
                     &gate_map,
                     original_circuit.n(),
                 );
-                let (is_correct, diff_indices) =
-                    check_probabilisitic_equivalence(&original_circuit, &mixed_circuit, &mut rng);
+                let (is_correct, diff_indices) = check_probabilisitic_equivalence(
+                    &original_circuit,
+                    &mixed_circuit,
+                    1000,
+                    &mut rng,
+                );
                 if !is_correct {
                     println!("[Error] Different at indices {:?}", diff_indices);
                     assert!(false);

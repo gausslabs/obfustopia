@@ -1,15 +1,14 @@
-use petgraph::algo::toposort;
 use rand::{thread_rng, Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rust::{
     check_probabilisitic_equivalence,
     circuit::{BaseGate, Circuit},
-    graph_level, prepare_circuit, run_local_mixing, toposort_with_cached_graph_neighbours,
+    prepare_circuit, run_local_mixing, toposort_with_cached_graph_neighbours,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     env::{self, args},
     error::Error,
     path::Path,
@@ -39,6 +38,8 @@ struct ObfuscationConfig {
     starategy: Strategy,
     /// Checkpoint steps. Checkpoints obfuscated circuit after `checkpoint` number of iterations
     checkpoint_steps: usize,
+    /// No. of iterations for probabilitic equivalance check.
+    probabilitic_eq_check_iterations: usize,
 }
 
 impl ObfuscationConfig {
@@ -48,6 +49,7 @@ impl ObfuscationConfig {
         max_convex_iterations: usize,
         max_replacement_iterations: usize,
         checkpoint_steps: usize,
+        probabilitic_eq_check_iterations: usize,
     ) -> Self {
         Self {
             n: n,
@@ -58,6 +60,7 @@ impl ObfuscationConfig {
             max_replacement_iterations,
             starategy: Strategy::Strategy1,
             checkpoint_steps,
+            probabilitic_eq_check_iterations,
         }
     }
 
@@ -68,6 +71,7 @@ impl ObfuscationConfig {
         max_convex_iterations: usize,
         max_replacement_iterations: usize,
         checkpoint_steps: usize,
+        probabilitic_eq_check_iterations: usize,
     ) -> Self {
         Self {
             n,
@@ -78,15 +82,16 @@ impl ObfuscationConfig {
             starategy: Strategy::Strategy2,
             total_steps: 0,
             checkpoint_steps,
+            probabilitic_eq_check_iterations,
         }
     }
 
     fn default_strategy1() -> Self {
-        ObfuscationConfig::new_with_strategy1(64, 400, 100_000, 10_000_000, 1000)
+        ObfuscationConfig::new_with_strategy1(64, 400, 100_000, 10_000_000, 1000, 1000)
     }
 
     fn default_strategy2() -> Self {
-        ObfuscationConfig::new_with_strategy2(64, 200, 200, 10000, 1000000, 1000)
+        ObfuscationConfig::new_with_strategy2(64, 200, 200, 10000, 1000000, 1000, 1000)
     }
 }
 
@@ -211,6 +216,7 @@ fn run_strategy1(job: &mut ObfuscationJob, job_path: String, debug: bool) {
             job.config.max_convex_iterations,
             job.config.max_replacement_iterations,
             to_checkpoint,
+            job.config.probabilitic_eq_check_iterations,
             |mixed_circuit| {
                 job.curr_circuit = mixed_circuit;
                 job.store(&job_path);
@@ -236,8 +242,12 @@ fn run_strategy1(job: &mut ObfuscationJob, job_path: String, debug: bool) {
             job.config.n as _,
         );
 
-        let (is_correct, diff_indices) =
-            check_probabilisitic_equivalence(&job.curr_circuit, &original_circuit, &mut rng);
+        let (is_correct, diff_indices) = check_probabilisitic_equivalence(
+            &job.curr_circuit,
+            &original_circuit,
+            job.config.probabilitic_eq_check_iterations,
+            &mut rng,
+        );
         if !is_correct {
             log::error!(
                 "[Error] [Strategy 1] Failed at end of Mixing stage. Different at indices {:?}",
@@ -296,6 +306,7 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
                 job.config.max_convex_iterations,
                 job.config.max_replacement_iterations,
                 to_checkpoint,
+                job.config.probabilitic_eq_check_iterations,
                 |mixed_circuit| {
                     job.curr_circuit = mixed_circuit;
                     job.store(&job_path);
@@ -321,8 +332,12 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
                 job.config.n as _,
             );
 
-            let (is_correct, diff_indices) =
-                check_probabilisitic_equivalence(&job.curr_circuit, &original_circuit, &mut rng);
+            let (is_correct, diff_indices) = check_probabilisitic_equivalence(
+                &job.curr_circuit,
+                &original_circuit,
+                job.config.probabilitic_eq_check_iterations,
+                &mut rng,
+            );
             if !is_correct {
                 log::error!(
                     "[Error] [Strategy 2] Failed at end of Inflationary stage. Different at indices {:?}",
@@ -362,6 +377,7 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
                 job.config.max_convex_iterations,
                 job.config.max_replacement_iterations,
                 to_checkpoint,
+                job.config.probabilitic_eq_check_iterations,
                 |mixed_circuit| {
                     job.curr_circuit = mixed_circuit;
                     job.store(&job_path);
@@ -388,8 +404,12 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
                 job.config.n as _,
             );
 
-            let (is_correct, diff_indices) =
-                check_probabilisitic_equivalence(&job.curr_circuit, &original_circuit, &mut rng);
+            let (is_correct, diff_indices) = check_probabilisitic_equivalence(
+                &job.curr_circuit,
+                &original_circuit,
+                job.config.probabilitic_eq_check_iterations,
+                &mut rng,
+            );
             if !is_correct {
                 log::error!(
                     "[Error] [Strategy 2] Failed at end of kneading stage. Different at indices {:?}",
@@ -423,24 +443,27 @@ fn create_log4rs_config(log_path: &str) -> Result<log4rs::Config, Box<dyn Error>
     Ok(config)
 }
 
-fn main() {
+fn run_obfuscation() {
     let debug = env::var("DEBUG") // only support `DEBUG=true` or `DEBUG=false`
         .ok()
         .and_then(|var| var.parse().ok())
         .unwrap_or(true);
 
     // Setup logs
-    let log_path = args().nth(1).expect("Log path");
+    let log_path = args().nth(2).expect("[1] Missing log path");
     let log_confg = create_log4rs_config(&log_path).unwrap();
     log4rs::init_config(log_confg).unwrap();
 
-    let job_path = args().nth(2).expect("Job path");
-    let orignal_circuit_path = args().nth(3).expect("Original path");
-
+    let job_path = args().nth(3).expect("[1] Missing obfuscated circuit path");
     let mut job = if std::fs::exists(&job_path).unwrap() {
+        log::info!("Found obfuscation job at path. Continuing the pending job.");
+
         ObfuscationJob::load(&job_path)
     } else {
-        let strategy = args().nth(4).map_or_else(
+        log::info!("Starting new obfuscation job at path");
+        let orignal_circuit_path = args().nth(4).expect("[1] Missing original circuit path");
+
+        let strategy = args().nth(5).map_or_else(
             || Strategy::Strategy1,
             |sid| match sid.parse::<u8>() {
                 Ok(sid) => {
@@ -492,6 +515,73 @@ fn main() {
         }
         Strategy::Strategy2 => {
             run_strategy2(&mut job, job_path, debug);
+        }
+    }
+}
+
+fn run_verification() {
+    let job_path = args().nth(2).expect("[1] Missing obfuscated circuit path");
+    std::fs::exists(&job_path).expect("[2] Missing obfuscated circuit at path");
+    let job = ObfuscationJob::load(&job_path);
+
+    let iterations = args().nth(3).map_or_else(
+        || 1000,
+        |id| id.parse::<usize>().map_or_else(|_| 1000, |x| x),
+    );
+
+    let original_circuit = &job.original_circuit;
+    let obfuscated_circuit = &job.curr_circuit;
+
+    let (success, diff_indices) = check_probabilisitic_equivalence(
+        original_circuit,
+        obfuscated_circuit,
+        iterations,
+        &mut thread_rng(),
+    );
+
+    if !success {
+        println!(
+            "Equivalance check failed with following different indices: {:?}",
+            diff_indices
+        );
+    }
+}
+
+fn main() {
+    let action = args()
+        .nth(1)
+        .map_or_else(|| 3, |id| id.parse::<u8>().map_or_else(|_| 3, |x| x));
+
+    match action {
+        1 => {
+            run_obfuscation();
+        }
+        2 => {
+            run_verification();
+        }
+        _ => {
+            // Help
+
+            println!(
+                r#"Welcome to Obfustopia
+
+To run obfuscation for a random circuit, run with args:
+
+`1 log_file_path obfuscated_circuit_path original_circuit_path S`
+
+Set `S` to 1 for strategy 1 (recommended) or 2 for strategy 2.
+
+To continue obfuscation for existing circut, run with args:
+
+`1 log_file_path obfuscated_circuit_path original_circuit_path`
+
+To check functional equivalence of obfuscated circuit with the original circuit, run with args:
+
+`2 obfuscated_circuit_path`
+
+To print this message again run without any args.
+"#
+            );
         }
     }
 }

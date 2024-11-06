@@ -18,7 +18,7 @@ mkdir -p "$strat1_dir" "$strat2_dir"
 for i in {1..5}; do
     echo "[Obfustopia: Strategy 1] Iteration $i:"
     mkdir -p "$strat1_dir/$i"
-    RUSTFLAGS="-Awarnings" cargo run --release --features="time" -- "$strat1_dir/$i/logs.log" "$strat1_dir/$i/out.bin" "$strat1_dir/$i/original_out.bin" 1
+    RUSTFLAGS="-Awarnings" cargo run --release --features="time" -- 1 "$strat1_dir/$i/logs.log" "$strat1_dir/$i/out.bin" "$strat1_dir/$i/original_out.bin" 1
     echo "[Obfustopia: Strategy 1] Completed iteration $i."
 done
 
@@ -26,6 +26,6 @@ done
 for i in {1..5}; do
     echo "[Obfustopia: Strategy 2] Iteration $i:"
     mkdir -p "$strat2_dir/$i"
-    RUSTFLAGS="-Awarnings" cargo run --release --features="time" -- "$strat2_dir/$i/logs.log" "$strat2_dir/$i/out.bin" "$strat2_dir/$i/original_out.bin" 2
+    RUSTFLAGS="-Awarnings" cargo run --release --features="time" -- 1 "$strat2_dir/$i/logs.log" "$strat2_dir/$i/out.bin" "$strat2_dir/$i/original_out.bin" 2
     echo "[Obfustopia: Strategy 2] Completed iteration $i."
 done
