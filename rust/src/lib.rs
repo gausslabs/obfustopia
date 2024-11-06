@@ -21,7 +21,7 @@ use rayon::{
         IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
         IntoParallelRefMutIterator, ParallelBridge, ParallelIterator,
     },
-    slice::ParallelSliceMut,
+    slice::{ParallelSlice, ParallelSliceMut},
 };
 
 use sha2::{Digest, Sha256};
@@ -62,14 +62,10 @@ macro_rules! timed {
 }
 
 #[allow(dead_code)]
-fn edges_to_string(edges: &HashSet<(NodeIndex, NodeIndex)>, g: &Graph<usize, usize>) -> String {
+fn edges_to_string(edges: &HashSet<(usize, usize)>) -> String {
     let mut string = String::from("[");
     for edge in edges.iter() {
-        string = format!(
-            "{string} ({}, {}),",
-            g.node_weight(edge.0).unwrap(),
-            g.node_weight(edge.1).unwrap()
-        );
+        string = format!("{string} ({}, {}),", edge.0, edge.1);
     }
     string = format!("{string}]");
     string
@@ -1500,6 +1496,12 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         top_sorted_outsiders
     };
 
+    log::trace!(
+        "@@@ No. of predecessors: {}@@@",
+        top_sorted_predecessors.len()
+    );
+    log::trace!("@@@ No. of successors: {}@@@", top_sorted_successors.len());
+
     #[cfg(feature = "trace")]
     {
         log::trace!(
@@ -1584,83 +1586,156 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             }
 
             for gate_id in transitive_collisions {
-                new_edges.insert((
-                    cin_nodes[i],
-                    *gate_id_to_node_index_map.get(&gate_id).unwrap(),
-                ));
+                new_edges.insert((cin_gates[i].id(), gate_id));
             }
         }
     });
 
     // Predecessors
-    timed!("Process predecessors", {
-        // Handle direction connections from predecessors to gates in C^in
+    // timed!("Process predecessors", {
+    // Handle direction connections from predecessors to gates in C^in
 
-        // let mut transitive_connections_to_remove = HashSet::new();
-        // let mut transitive_connections_to_add = vec![HashSet::new(); cin_gates.len()];
-        // let chunk_size = top_sorted_predecessors.len() / (current_num_threads()   / 4);
+    // let mut transitive_connections_to_remove = HashSet::new();
+    // let mut transitive_connections_to_add = vec![HashSet::new(); cin_gates.len()];
+    let mut chunk_size = top_sorted_predecessors.len()
+        / (current_num_threads() as f64 / ell_in as f64).ceil() as usize;
+    if chunk_size == 0 {
+        chunk_size += 1;
+    }
 
-        let (mut tc_to_add, tc_to_remove, direct_outgoing_to_add, direct_incoming_to_add) =
+    // println!("Chunk size={chunk_size}; threads={}; total_preds={}", current_num_threads(), top_sorted_predecessors.len());
+    // println!("Starting pred processing");
+
+    {
+        let (mut tc_to_add, tc_to_remove, direct_outgoing_to_add, direct_incoming_to_add) = timed!(
+            "[Process predecessors] Process C^in gates in parallel",
             cin_gates
                 .par_iter()
                 .enumerate()
                 .map(|(i, gate_i)| {
-                    let mut gate_i_pred_collisions = HashSet::new();
-
-                    let mut tc_add = HashSet::new();
-                    let mut tc_remove = HashSet::new();
-
-                    let mut direct_outgoing_to_insert = HashMap::new();
-                    let mut direct_incoming_to_insert = HashMap::new();
-
                     // It is possible to chunk topologically sorted predecessors into multiple chunks (ideally `top_sorted_predecessors.len() / (current_num_threads() / 4)`)
                     // and process each chunk separately. After which remove transtive edge from predecessor A to the gate if there exist an edge from a direct connection of A
                     // in any of the succeding chunks.
                     // We're deprioritising this for the moment.
 
-                    for pred in top_sorted_predecessors.iter().rev() {
-                        let pred_gate = gate_map
-                            .get(skeleton_graph.node_weight(*pred).unwrap())
-                            .unwrap();
+                    let (tc_remove, tc_add_chunk_map, direct_outgoing_to_insert,direct_incoming_to_insert)=   top_sorted_predecessors
+                        .par_chunks(chunk_size)
+                        .enumerate()
+                        .map(|(chunk_index, top_preds_chunk)| {
+                            // direct outgoing connections to gate_i
+                            let mut direct_outgoing_to_insert_chunk = HashSet::new();
+                            // direct incoming connections to gate_i
+                            let mut direct_incoming_to_insert_chunk = HashSet::new();
 
-                        if pred_gate.check_collision(gate_i) {
-                            let gate_i_dc = direct_connections.get(&gate_i.id()).unwrap();
-                            let pred_direct_collisions =
-                                direct_connections.get(&pred_gate.id()).unwrap();
+                            let mut tc_add_chunk = HashSet::new();
+                            let mut tc_remove_chunk = HashSet::new();
 
-                            // Remove all transitive edges to nodes that gate_i has direct connections with.
-                            for gate_id in pred_direct_collisions.intersection(gate_i_dc) {
-                                if active_edges_with_gateids.contains(&(pred_gate.id(), *gate_id)) {
-                                    tc_remove.insert((pred_gate.id(), *gate_id));
+                            let mut gate_i_pred_collisions_chunk = HashSet::new();
+
+                            for pred in top_preds_chunk.iter().rev() {
+                                let pred_gate = gate_map
+                                    .get(skeleton_graph.node_weight(*pred).unwrap())
+                                    .unwrap();
+
+                                if pred_gate.check_collision(gate_i) {
+                                    let gate_i_dc = direct_connections.get(&gate_i.id()).unwrap();
+                                    let pred_direct_collisions =
+                                        direct_connections.get(&pred_gate.id()).unwrap();
+
+                                    // Remove all transitive edges to nodes that gate_i has direct connections with.
+                                    for gate_id in pred_direct_collisions.intersection(gate_i_dc) {
+                                        if active_edges_with_gateids
+                                            .contains(&(pred_gate.id(), *gate_id))
+                                        {
+                                            tc_remove_chunk.insert((pred_gate.id(), *gate_id));
+                                        }
+                                    }
+
+                                    // only add transitive edge from pred to gate i if there's no gate beetwen pred and gate i which collides with both.
+                                    if pred_direct_collisions
+                                        .is_disjoint(&gate_i_pred_collisions_chunk)
+                                    {
+                                        tc_add_chunk.insert(pred_gate.id());
+                                    }
+
+                                    direct_outgoing_to_insert_chunk
+                                        .insert(pred_gate.id());
+                                    direct_incoming_to_insert_chunk
+                                        .insert(pred_gate.id());
+
+                                    gate_i_pred_collisions_chunk.insert(pred_gate.id());
                                 }
                             }
 
-                            // only add transitive edge from pred to gate i if there's no gate beetwen pred and gate i which collides with both.
-                            if pred_direct_collisions.is_disjoint(&gate_i_pred_collisions) {
-                                tc_add.insert(pred_gate.id());
+                            let mut tc_add_chunk_map = HashMap::new();
+                            tc_add_chunk_map.insert(chunk_index, tc_add_chunk);
+
+                            return (
+                                tc_remove_chunk,
+                                tc_add_chunk_map,
+                                direct_outgoing_to_insert_chunk,
+                                direct_incoming_to_insert_chunk,
+                            );
+                        })
+                        .reduce(
+                            || {
+                                (
+                                    HashSet::new(),
+                                    HashMap::new(),
+                                    HashSet::new(),
+                                    HashSet::new(),
+                                )
+                            },
+                            |(mut tc_remove0,mut  tc_add0,mut  direct_outgoing0,mut  direct_incoming0), (tc_remove1, tc_add1, direct_outgoing1, direct_incoming1)| {
+                                tc_remove0.extend(tc_remove1);
+                                tc_add0.extend(tc_add1);
+                                direct_outgoing0.extend(direct_outgoing1);
+                                direct_incoming0.extend(direct_incoming1);
+
+                                (tc_remove0, tc_add0, direct_outgoing0, direct_incoming0)
+                            },
+                        );
+
+
+                    let chunk_max_index = *tc_add_chunk_map.keys().max().unwrap();
+                    let mut tc_add = HashSet::new();
+                    for i in 0..=chunk_max_index {
+                        let chunk_i_adds = tc_add_chunk_map.get(&i).unwrap();
+
+                        for pred in chunk_i_adds.iter() {
+                            let mut should_remove_pred = false;
+                            let pred_dc = direct_connections.get(pred).unwrap();
+                            for j in i+1..=chunk_max_index {
+                                let chunk_j_adds = tc_add_chunk_map.get(&j).unwrap();
+                                if !pred_dc.is_disjoint(chunk_j_adds) {
+                                    should_remove_pred = true;
+                                }
                             }
 
-                            direct_outgoing_to_insert
-                                .entry(pred_gate.id())
-                                .or_insert(HashSet::new())
-                                .insert(gate_i.id());
-                            direct_incoming_to_insert
-                                .entry(gate_i.id())
-                                .or_insert(HashSet::new())
-                                .insert(pred_gate.id());
-
-                            gate_i_pred_collisions.insert(pred_gate.id());
+                            if !should_remove_pred {
+                                tc_add.insert(*pred);
+                            }
                         }
                     }
 
                     let mut tc_add_out = HashMap::new();
                     tc_add_out.insert(i, tc_add);
 
+                    let mut direct_outgoing_to_insert_out = HashMap::new();
+                    for node in direct_outgoing_to_insert {
+                        let mut set = HashSet::new();
+                        set.insert(gate_i.id());
+                        direct_outgoing_to_insert_out.insert(node, set);
+                    }
+                    let mut direct_incoming_to_insert_out = HashMap::new();
+                    direct_incoming_to_insert_out.insert(gate_i.id(),direct_incoming_to_insert);
+
+
                     (
                         tc_add_out,
                         tc_remove,
-                        direct_outgoing_to_insert,
-                        direct_incoming_to_insert,
+                        direct_outgoing_to_insert_out,
+                        direct_incoming_to_insert_out,
                     )
                 })
                 .reduce(
@@ -1714,7 +1789,8 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                             direct_incoming_to_insert0,
                         )
                     },
-                );
+                )
+        );
 
         for i in (0..cin_gates.len()).rev() {
             let i_id = cin_gates[i].id();
@@ -1740,30 +1816,31 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             }
         }
 
-        for remove_tup in tc_to_remove {
-            remove_edges.insert((
-                *gate_id_to_node_index_map.get(&remove_tup.0).unwrap(),
-                *gate_id_to_node_index_map.get(&remove_tup.1).unwrap(),
-            ));
-        }
+        remove_edges = tc_to_remove;
 
         for (i, incoming_conn_cin_gate_i) in tc_to_add.iter() {
             for id in incoming_conn_cin_gate_i {
-                new_edges.insert((
-                    *gate_id_to_node_index_map.get(id).unwrap(),
-                    *gate_id_to_node_index_map.get(&cin_gates[*i].id()).unwrap(),
-                ));
+                new_edges.insert((*id, cin_gates[*i].id()));
             }
         }
 
-        // Extend direct outgoing connections and direct incoming connections
-        for (k, v) in direct_outgoing_to_add {
-            direct_connections.get_mut(&k).unwrap().extend(v);
-        }
-        for (k, v) in direct_incoming_to_add {
-            direct_incoming_connections.get_mut(&k).unwrap().extend(v);
-        }
-    });
+        timed!(
+            "[Process predecessors] Extend outgoing and incoming direct conns",
+            {
+                // Extend direct outgoing connections and direct incoming connections
+                for (k, v) in direct_outgoing_to_add {
+                    direct_connections.get_mut(&k).unwrap().extend(v);
+                }
+                for (k, v) in direct_incoming_to_add {
+                    direct_incoming_connections.get_mut(&k).unwrap().extend(v);
+                }
+            }
+        );
+    }
+
+    // println!("Done pred processing");
+
+    // });
 
     let cout_ids = cout_convex_subset
         .iter()
@@ -1793,14 +1870,8 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                 direct_connections.get(&id).unwrap()
             );
         }
-        log::trace!(
-            "New edges 0: {}",
-            edges_to_string(&new_edges, &skeleton_graph)
-        );
-        log::trace!(
-            "Remove edges: {}",
-            edges_to_string(&remove_edges, &skeleton_graph)
-        );
+        log::trace!("New edges 0: {}", edges_to_string(&new_edges,));
+        log::trace!("Remove edges: {}", edges_to_string(&remove_edges,));
     }
 
     timed!(
@@ -1836,10 +1907,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                                 // check that intersection of DCs of pred and DICs of succ > 0. If not create an edge from pred to succ
                                 let succ_dics = direct_incoming_connections.get(succ).unwrap();
                                 if pred_dcs.is_disjoint(succ_dics) {
-                                    edges.insert((
-                                        *gate_id_to_node_index_map.get(pred).unwrap(),
-                                        *gate_id_to_node_index_map.get(succ).unwrap(),
-                                    ));
+                                    edges.insert((*pred, *succ));
                                 }
                             }
                         }
@@ -1861,10 +1929,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                                     // check that intersection of DCs of pred and DICs of succ > 0. If not create an edge from pred to succ
                                     let succ_dics = direct_incoming_connections.get(succ).unwrap();
                                     if (pred_dcs.intersection(succ_dics)).count() == 0 {
-                                        new_edges_old.insert((
-                                            *gate_id_to_node_index_map.get(pred).unwrap(),
-                                            *gate_id_to_node_index_map.get(succ).unwrap(),
-                                        ));
+                                        new_edges_old.insert((*pred, *succ));
                                     }
                                 }
                             }
@@ -1889,61 +1954,59 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         )
     }
 
+    // Remove "removed edges" from active edges set
+    timed!(
+        "Remove removed edges from active edge set",
+        remove_edges.iter().for_each(|edge| {
+            assert!(active_edges_with_gateids.remove(edge));
+        })
+    );
+
+    // Add new edges to active edges set
+    timed!(
+        "Add new edges to active edge set",
+        for edge in new_edges.iter() {
+            active_edges_with_gateids.insert(*edge);
+        }
+    );
+
     // Remove edges
-    let mut real_removed_edge_targets = HashSet::new();
     timed!(
         "Find indices and remove 'to be removed' edges in the graph",
         {
             remove_edges
             .iter()
-            .for_each(|edge| match skeleton_graph.find_edge(edge.0, edge.1) {
+            .for_each(|edge|{
+                let source_index = *gate_id_to_node_index_map.get(&edge.0).unwrap();
+                let target_index = *gate_id_to_node_index_map.get(&edge.1).unwrap();
+                 match skeleton_graph.find_edge(source_index, target_index) {
                 Some(e) => {
                     // let source_id = *skeleton_graph.node_weight(edge.0).unwrap();
                     // let target_id = *skeleton_graph.node_weight(edge.1).unwrap();
                     // log::trace!("Removing ({source_id}, {target_id})");
                     // assert!(active_edges_with_gateids.contains(&(source_id, target_id)));
-                    real_removed_edge_targets.insert(edge.0);
-                    real_removed_edge_targets.insert(edge.1);
-
                     skeleton_graph.remove_edge(e).unwrap();
 
                 },
                 None => {
-                    let source_id = *skeleton_graph.node_weight(edge.0).unwrap();
-                    let target_id = *skeleton_graph.node_weight(edge.1).unwrap();
-
+                    let source_id = edge.0;
+                    let target_id = edge.1;
                     assert!(active_edges_with_gateids.contains(&(source_id, target_id)));
                     assert!(false, "active_edges_with_gateids contains the edge {:?} but it does not exists in the skeleton graph" , (source_id, target_id));
                 }
+            }
             })
         }
-    );
-
-    // Remove "removed edges" from active edges set
-    timed!(
-        "Remove removed edges from active edge set",
-        remove_edges.iter().for_each(|edge| {
-            let source_id = *skeleton_graph.node_weight(edge.0).unwrap();
-            let target_id = *skeleton_graph.node_weight(edge.1).unwrap();
-            assert!(active_edges_with_gateids.remove(&(source_id, target_id)));
-        })
     );
 
     // Add new edges
     timed!(
         "Add new edges to graph",
         for edge in &new_edges {
-            skeleton_graph.update_edge(edge.0, edge.1, Default::default());
-        }
-    );
+            let source_index = *gate_id_to_node_index_map.get(&edge.0).unwrap();
+            let target_index = *gate_id_to_node_index_map.get(&edge.1).unwrap();
 
-    // Add new edges to active edges set
-    timed!(
-        "Insert new edges to active edge set",
-        for edge in new_edges.iter() {
-            let source_id = *skeleton_graph.node_weight(edge.0).unwrap();
-            let target_id = *skeleton_graph.node_weight(edge.1).unwrap();
-            active_edges_with_gateids.insert((source_id, target_id));
+            skeleton_graph.update_edge(source_index, target_index, Default::default());
         }
     );
 
@@ -1987,9 +2050,18 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                 cin_nodes.iter().copied(),
                 c_out_imm_predecessors.iter().copied(),
                 c_out_imm_successors.iter().copied(),
-                new_edges.iter().flat_map(|e| [e.0, e.1]),
-                // .filter(|target| target.index() < skeleton_graph.node_count()),
-                real_removed_edge_targets.iter().copied(),
+                new_edges.iter().flat_map(|e| {
+                    [
+                        *gate_id_to_node_index_map.get(&e.0).unwrap(),
+                        *gate_id_to_node_index_map.get(&e.1).unwrap(),
+                    ]
+                }),
+                remove_edges.iter().flat_map(|e| {
+                    [
+                        *gate_id_to_node_index_map.get(&e.0).unwrap(),
+                        *gate_id_to_node_index_map.get(&e.1).unwrap(),
+                    ]
+                })
             ]
             .collect(),
             removed_nodes
