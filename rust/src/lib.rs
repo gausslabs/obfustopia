@@ -1697,15 +1697,16 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                         );
 
 
-                    let chunk_max_index = *tc_add_chunk_map.keys().max().unwrap();
                     let mut tc_add = HashSet::new();
-                    for i in 0..=chunk_max_index {
+                    match tc_add_chunk_map.keys().max() { 
+                        Some(chunk_max_index ) => {
+                            for i in 0..=*chunk_max_index {
                         let chunk_i_adds = tc_add_chunk_map.get(&i).unwrap();
 
                         for pred in chunk_i_adds.iter() {
                             let mut should_remove_pred = false;
                             let pred_dc = direct_connections.get(pred).unwrap();
-                            for j in i+1..=chunk_max_index {
+                            for j in i+1..=*chunk_max_index {
                                 let chunk_j_adds = tc_add_chunk_map.get(&j).unwrap();
                                 if !pred_dc.is_disjoint(chunk_j_adds) {
                                     should_remove_pred = true;
@@ -1717,7 +1718,10 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
                             }
                         }
                     }
-
+                        },
+                        None => {}
+                    }
+                    
                     let mut tc_add_out = HashMap::new();
                     tc_add_out.insert(i, tc_add);
 
