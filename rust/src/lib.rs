@@ -1958,7 +1958,9 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     }
 
     // make sure remove edge set and new edge set are disjoint
-    // remove_edges.retain(|node|!new_edges.contains(node));
+    //
+    // This is because removal and addition in the graph is more expensive.
+    remove_edges.retain(|node|!new_edges.contains(node));
 
 
     // Remove "removed edges" from active edges set
