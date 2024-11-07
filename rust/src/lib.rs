@@ -23,10 +23,9 @@ use rayon::{
     },
     slice::{ParallelSlice, ParallelSliceMut},
 };
-
 use std::{
     array::from_fn,
-    collections::{HashMap, HashSet, VecDeque},
+    collections:: VecDeque,
     fmt::{Debug, Display},
     hash::Hash,
     iter::{self, repeat_with},
@@ -37,6 +36,7 @@ use std::{
     },
     time::Duration,
 };
+use hashbrown::{HashMap, HashSet};
 
 pub mod circuit;
 
@@ -908,6 +908,7 @@ fn update_graph_neighbors(
         *outgoing = HashSet::new();
     });
 
+
     in_degree.resize_with(graph.node_count(), Default::default);
     let in_degree_slice = UnsafeSlice::new(in_degree);
     incoming.into_par_iter().for_each(|n| unsafe {
@@ -1489,7 +1490,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         let mut top_sorted_outsiders = skeleton_graph
             .node_indices()
             .par_bridge()
-            .filter(|n| !insider.contains(&n))
+            .filter(|n| !insider.contains(n))
             .collect::<Vec<_>>();
         top_sorted_outsiders.par_sort_by(|a, b| level[a.index()].cmp(&level[b.index()]));
         top_sorted_outsiders
@@ -1580,7 +1581,7 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             let mut transitive_collisions = direct_collisions.clone();
 
             for g_id in direct_collisions.iter() {
-                let dc_other_gate = direct_connections.get(&g_id).unwrap();
+                let dc_other_gate = direct_connections.get(g_id).unwrap();
                 transitive_collisions.retain(|n| !dc_other_gate.contains(n));
             }
 
@@ -1853,11 +1854,11 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
     let mut union_dir_conns = HashSet::new();
     let mut union_dir_inc_conns = HashSet::new();
     cout_ids.iter().for_each(|id| {
-        let mut conns = direct_connections.get(&id).unwrap().clone();
+        let mut conns = direct_connections.get(id).unwrap().clone();
         conns.retain(|v| !cout_ids.contains(v));
         union_dir_conns.extend(conns);
 
-        let mut inc_conns = direct_incoming_connections.get(&id).unwrap().clone();
+        let mut inc_conns = direct_incoming_connections.get(id).unwrap().clone();
         inc_conns.retain(|v| !cout_ids.contains(v));
         union_dir_inc_conns.extend(inc_conns);
     });

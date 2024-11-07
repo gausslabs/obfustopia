@@ -1,9 +1,10 @@
 use bitvec::{array::BitArray, vec::BitVec};
+use hashbrown::HashMap;
 use itertools::{chain, izip, Itertools};
 use petgraph::{graph::NodeIndex, Graph};
 use rand::{seq::SliceRandom, RngCore};
 use serde::{Deserialize, Serialize};
-use std::{array::from_fn, collections::HashMap, fmt::Display, iter::repeat_with};
+use std::{fmt::Display, iter::repeat_with};
 
 pub trait Gate {
     type Input: ?Sized;

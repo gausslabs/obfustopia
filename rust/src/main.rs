@@ -1,3 +1,4 @@
+use hashbrown::HashSet;
 use rand::{thread_rng, Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rust::{
@@ -8,7 +9,6 @@ use rust::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
     env::{self, args},
     error::Error,
     path::Path,
