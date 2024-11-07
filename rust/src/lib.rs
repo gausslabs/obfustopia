@@ -24,7 +24,6 @@ use rayon::{
     slice::{ParallelSlice, ParallelSliceMut},
 };
 
-use sha2::{Digest, Sha256};
 use std::{
     array::from_fn,
     collections::{HashMap, HashSet, VecDeque},
@@ -1958,6 +1957,10 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
         )
     }
 
+    // make sure remove edge set and new edge set are disjoint
+    // remove_edges.retain(|node|!new_edges.contains(node));
+
+
     // Remove "removed edges" from active edges set
     timed!(
         "Remove removed edges from active edge set",
@@ -1965,6 +1968,10 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             assert!(active_edges_with_gateids.remove(edge));
         })
     );
+
+
+    // Remove from `new_edges` the edges that are in `active_edges` set
+    new_edges.retain(|node|!active_edges_with_gateids.contains(node));
 
     // Add new edges to active edges set
     timed!(
@@ -2010,7 +2017,9 @@ pub fn local_mixing_step<R: Send + Sync + SeedableRng + RngCore>(
             let source_index = *gate_id_to_node_index_map.get(&edge.0).unwrap();
             let target_index = *gate_id_to_node_index_map.get(&edge.1).unwrap();
 
-            skeleton_graph.update_edge(source_index, target_index, Default::default());
+            // assert!(skeleton_graph.find_edge(source_index,target_index).is_none());
+
+            skeleton_graph.add_edge(source_index, target_index, Default::default());
         }
     );
 
