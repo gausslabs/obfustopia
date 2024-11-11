@@ -38,7 +38,7 @@ impl<const N: usize, D> BaseGate<N, D> {
         }
     };
 
-    pub(crate) fn new(id: usize, target: D, controls: [D; N], control_func: u8) -> Self {
+    pub fn new(id: usize, target: D, controls: [D; N], control_func: u8) -> Self {
         debug_assert!(control_func < Self::N_CONTROL_FUNC);
         Self {
             id,

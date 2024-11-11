@@ -548,17 +548,19 @@ fn run_verification() {
     }
 }
 
-fn run_job_to_ob() {
-    let input_path = args().nth(2).expect("[1] Missing binary circuit path");
-    let output_path = args().nth(3).expect("[2] Missing ob output path");
+#[derive(Serialize, Deserialize)]
+struct PrettyCircuit {
+    wire_count: usize,
+    gate_count: usize,
+    gates: Vec<[u8; 4]>,
+}
 
-    let circuit: Circuit<BaseGate<2, u8>> =
-        bincode::deserialize(&std::fs::read(input_path).unwrap()).unwrap();
-
-    std::fs::write(
-        output_path,
-        serde_json::to_string(
-            &circuit
+impl From<&Circuit<BaseGate<2, u8>>> for PrettyCircuit {
+    fn from(circuit: &Circuit<BaseGate<2, u8>>) -> Self {
+        PrettyCircuit {
+            wire_count: circuit.n(),
+            gate_count: circuit.gates().len(),
+            gates: circuit
                 .gates()
                 .iter()
                 .map(|gate| {
@@ -570,16 +572,90 @@ fn run_job_to_ob() {
                     ]
                 })
                 .collect_vec(),
+        }
+    }
+}
+
+impl From<&PrettyCircuit> for Circuit<BaseGate<2, u8>> {
+    fn from(circuit: &PrettyCircuit) -> Self {
+        Circuit::new(
+            circuit
+                .gates
+                .iter()
+                .enumerate()
+                .map(|(id, [control0, control1, target, control_func])| {
+                    BaseGate::<2, u8>::new(id, *target, [*control0, *control1], *control_func)
+                })
+                .collect(),
+            circuit.wire_count,
         )
-        .unwrap(),
+    }
+}
+
+fn run_convert_circuit_to_json() {
+    let input_path = args()
+        .nth(2)
+        .expect("[1] Missing binary circuit input path");
+    let output_path = args().nth(3).expect("[2] Missing json circuit output path");
+
+    let circuit: Circuit<BaseGate<2, u8>> =
+        bincode::deserialize(&std::fs::read(input_path).unwrap()).unwrap();
+
+    std::fs::write(
+        output_path,
+        serde_json::to_string_pretty(&PrettyCircuit::from(&circuit)).unwrap(),
     )
     .unwrap();
+}
+
+fn run_convert_job_to_json() {
+    let input_path = args().nth(2).expect("[1] Missing job input path");
+    let output_path = args().nth(3).expect("[2] Missing json circuit output path");
+
+    let job = ObfuscationJob::load(input_path);
+
+    std::fs::write(
+        output_path,
+        serde_json::to_string_pretty(&PrettyCircuit::from(&job.curr_circuit)).unwrap(),
+    )
+    .unwrap();
+}
+
+fn run_evaluate_circuit() {
+    let circuit_path = args().nth(2).expect("[1] Missing json circuit input path");
+    let inputs = args()
+        .nth(3)
+        .expect("[2] Missing circuit inputs")
+        .split(",")
+        .map(|bit| {
+            bit.parse::<u8>()
+                .ok()
+                .and_then(|bit| (bit == 0 || bit == 1).then_some(bit == 1))
+                .unwrap_or_else(|| panic!("Expected 0 or 1 but got {}", bit))
+        })
+        .collect_vec();
+
+    let circuit: &PrettyCircuit =
+        &serde_json::from_reader(std::fs::File::open(circuit_path).unwrap()).unwrap();
+    let circuit: Circuit<BaseGate<2, u8>> = circuit.into();
+
+    if inputs.len() != circuit.n() {
+        panic!(
+            "Unexpected number of inputs, got {} but expected {}",
+            inputs.len(),
+            circuit.n()
+        )
+    }
+
+    let mut inputs = inputs;
+    circuit.run(&mut inputs);
+    println!("{}", inputs.into_iter().map(|bit| bit as u8).join(","))
 }
 
 fn main() {
     let action = args()
         .nth(1)
-        .map_or_else(|| 3, |id| id.parse::<u8>().map_or_else(|_| 4, |x| x));
+        .map_or_else(|| 3, |id| id.parse::<u8>().map_or_else(|_| 6, |x| x));
 
     match action {
         1 => {
@@ -589,7 +665,13 @@ fn main() {
             run_verification();
         }
         3 => {
-            run_job_to_ob();
+            run_convert_circuit_to_json();
+        }
+        4 => {
+            run_convert_job_to_json();
+        }
+        5 => {
+            run_evaluate_circuit();
         }
         _ => {
             // Help
