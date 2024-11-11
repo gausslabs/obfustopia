@@ -69,7 +69,7 @@ impl<const N: usize, D> BaseGate<N, D> {
         self.controls
     }
 
-    pub(crate) fn control_func(&self) -> u8 {
+    pub fn control_func(&self) -> u8 {
         self.control_func
     }
 }

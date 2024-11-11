@@ -696,6 +696,7 @@ dependencies = [
  "rand_xorshift",
  "rayon",
  "serde",
+ "serde_json",
  "sha2",
 ]
 

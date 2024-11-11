@@ -1,4 +1,5 @@
 use hashbrown::HashSet;
+use itertools::Itertools;
 use rand::{thread_rng, Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rust::{
@@ -547,10 +548,38 @@ fn run_verification() {
     }
 }
 
+fn run_job_to_ob() {
+    let input_path = args().nth(2).expect("[1] Missing binary circuit path");
+    let output_path = args().nth(3).expect("[2] Missing ob output path");
+
+    let circuit: Circuit<BaseGate<2, u8>> =
+        bincode::deserialize(&std::fs::read(input_path).unwrap()).unwrap();
+
+    std::fs::write(
+        output_path,
+        serde_json::to_string(
+            &circuit
+                .gates()
+                .iter()
+                .map(|gate| {
+                    [
+                        gate.controls()[0],
+                        gate.controls()[1],
+                        gate.target(),
+                        gate.control_func(),
+                    ]
+                })
+                .collect_vec(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 fn main() {
     let action = args()
         .nth(1)
-        .map_or_else(|| 3, |id| id.parse::<u8>().map_or_else(|_| 3, |x| x));
+        .map_or_else(|| 3, |id| id.parse::<u8>().map_or_else(|_| 4, |x| x));
 
     match action {
         1 => {
@@ -558,6 +587,9 @@ fn main() {
         }
         2 => {
             run_verification();
+        }
+        3 => {
+            run_job_to_ob();
         }
         _ => {
             // Help
