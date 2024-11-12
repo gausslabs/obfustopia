@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use std::{
     env::{self, args},
     error::Error,
+    io::Read,
     path::Path,
 };
 
@@ -444,6 +445,7 @@ fn create_log4rs_config(log_path: &str) -> Result<log4rs::Config, Box<dyn Error>
     Ok(config)
 }
 
+/// Start a new obfuscation job OR continue an existing obfuscation job
 fn run_obfuscation() {
     let debug = env::var("DEBUG") // only support `DEBUG=true` or `DEBUG=false`
         .ok()
@@ -451,18 +453,18 @@ fn run_obfuscation() {
         .unwrap_or(true);
 
     // Setup logs
-    let log_path = args().nth(2).expect("[1] Missing log path");
+    let log_path = args().nth(2).expect("Missing log path");
     let log_confg = create_log4rs_config(&log_path).unwrap();
     log4rs::init_config(log_confg).unwrap();
 
-    let job_path = args().nth(3).expect("[1] Missing obfuscated circuit path");
+    let job_path = args().nth(3).expect("Missing obfuscated circuit path");
     let mut job = if std::fs::exists(&job_path).unwrap() {
         log::info!("Found obfuscation job at path. Continuing the pending job.");
 
         ObfuscationJob::load(&job_path)
     } else {
         log::info!("Starting new obfuscation job at path");
-        let orignal_circuit_path = args().nth(4).expect("[1] Missing original circuit path");
+        let orignal_circuit_path = args().nth(4).expect("Missing original circuit path");
 
         let strategy = args().nth(5).map_or_else(
             || Strategy::Strategy1,
@@ -520,9 +522,11 @@ fn run_obfuscation() {
     }
 }
 
-fn run_verification() {
-    let job_path = args().nth(2).expect("[1] Missing obfuscated circuit path");
-    std::fs::exists(&job_path).expect("[2] Missing obfuscated circuit at path");
+/// Verifies that a obfuscation job is correct by checking whether it is obfuscated circuit
+/// is functionally equivalent to the original circuit
+fn run_job_verification() {
+    let job_path = args().nth(2).expect("Missing obfuscated circuit path");
+    std::fs::exists(&job_path).expect("Missing obfuscated circuit at path");
     let job = ObfuscationJob::load(&job_path);
 
     let iterations = args().nth(3).map_or_else(
@@ -532,13 +536,58 @@ fn run_verification() {
 
     let original_circuit = &job.original_circuit;
     let obfuscated_circuit = &job.curr_circuit;
+    run_verification(original_circuit, obfuscated_circuit, iterations);
 
-    let (success, diff_indices) = check_probabilisitic_equivalence(
-        original_circuit,
-        obfuscated_circuit,
-        iterations,
-        &mut thread_rng(),
+    println!("Obfsucated job verification with {iterations} iterations is success");
+}
+
+/// Checks whether file at `file_path` is `json`
+fn is_json_file(file_path: &str) -> bool {
+    Path::new(file_path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map_or(false, |ext| ext.eq_ignore_ascii_case("json"))
+}
+
+/// Takes Json path to two circuit files ands check whether they are funtionally equivalent
+fn run_circuits_json_equivalence_check() {
+    let c0: Circuit<BaseGate<2, u8>> = {
+        let c0_path = args().nth(2).expect("Missing circuit 1 json file at path");
+        assert!(is_json_file(&c0_path), "{c0_path} is not circuit JSON file");
+        let mut c0_file = std::fs::File::open(c0_path).unwrap();
+        let mut c0_contents = String::new();
+        c0_file.read_to_string(&mut c0_contents).unwrap();
+        let c0: PrettyCircuit = serde_json::from_str(&c0_contents).unwrap();
+        (&c0).into()
+    };
+    let c1: Circuit<BaseGate<2, u8>> = {
+        let c1_path = args().nth(3).expect("Missing circuit 2 json file at path");
+        assert!(is_json_file(&c1_path), "{c1_path} is not circuit JSON file");
+        let mut c1_file = std::fs::File::open(c1_path).unwrap();
+        let mut c1_contents = String::new();
+        c1_file.read_to_string(&mut c1_contents).unwrap();
+        let c0: PrettyCircuit = serde_json::from_str(&c1_contents).unwrap();
+        (&c0).into()
+    };
+
+    let iterations = args().nth(4).map_or_else(
+        || 1000,
+        |id| id.parse::<usize>().map_or_else(|_| 1000, |x| x),
     );
+
+    run_verification(&c0, &c1, iterations);
+
+    println!("circuit 0, circuit 1 equivalance check with {iterations} iterations is success");
+}
+
+/// Verifies whether 2 circuits are equivalent
+fn run_verification(
+    c0: &Circuit<BaseGate<2, u8>>,
+    c1: &Circuit<BaseGate<2, u8>>,
+    iterations: usize,
+) {
+    let (success, diff_indices) =
+        check_probabilisitic_equivalence(c0, c1, iterations, &mut thread_rng());
 
     if !success {
         println!(
@@ -593,9 +642,7 @@ impl From<&PrettyCircuit> for Circuit<BaseGate<2, u8>> {
 }
 
 fn run_convert_circuit_to_json() {
-    let input_path = args()
-        .nth(2)
-        .expect("[1] Missing binary circuit input path");
+    let input_path = args().nth(2).expect("Missing binary circuit input path");
     let output_path = args().nth(3).expect("[2] Missing json circuit output path");
 
     let circuit: Circuit<BaseGate<2, u8>> =
@@ -622,10 +669,11 @@ fn run_convert_job_to_json() {
 }
 
 fn run_evaluate_circuit() {
-    let circuit_path = args().nth(2).expect("[1] Missing json circuit input path");
+    let circuit_path = args().nth(2).expect("Missing json circuit input path");
+    assert!(is_json_file(&circuit_path));
     let inputs = args()
         .nth(3)
-        .expect("[2] Missing circuit inputs")
+        .expect("Missing circuit inputs")
         .split(",")
         .map(|bit| {
             bit.parse::<u8>()
@@ -641,9 +689,9 @@ fn run_evaluate_circuit() {
 
     if inputs.len() != circuit.n() {
         panic!(
-            "Unexpected number of inputs, got {} but expected {}",
+            "Unexpected number of inputs. Expected {} got {}",
+            circuit.n(),
             inputs.len(),
-            circuit.n()
         )
     }
 
@@ -655,14 +703,13 @@ fn run_evaluate_circuit() {
 fn main() {
     let action = args()
         .nth(1)
-        .map_or_else(|| 3, |id| id.parse::<u8>().map_or_else(|_| 6, |x| x));
-
+        .map_or_else(|| 100, |id| id.parse::<u8>().map_or_else(|_| 100, |x| x));
     match action {
         1 => {
             run_obfuscation();
         }
         2 => {
-            run_verification();
+            run_job_verification();
         }
         3 => {
             run_convert_circuit_to_json();
@@ -671,30 +718,20 @@ fn main() {
             run_convert_job_to_json();
         }
         5 => {
+            run_circuits_json_equivalence_check();
+        }
+        6 => {
             run_evaluate_circuit();
         }
         _ => {
             // Help
-
             println!(
-                r#"Welcome to Obfustopia
+                r#"
+            Welcome to Obfustopia
 
-To run obfuscation for a random circuit, run with args:
-
-`1 log_file_path obfuscated_circuit_path original_circuit_path S`
-
-Set `S` to 1 for strategy 1 (recommended) or 2 for strategy 2.
-
-To continue obfuscation for existing circut, run with args:
-
-`1 log_file_path obfuscated_circuit_path original_circuit_path`
-
-To check functional equivalence of obfuscated circuit with the original circuit, run with args:
-
-`2 obfuscated_circuit_path`
-
-To print this message again run without any args.
-"#
+Please refer to README for instructions on how to use.
+            
+                "#
             );
         }
     }
