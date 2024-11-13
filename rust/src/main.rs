@@ -89,11 +89,11 @@ impl ObfuscationConfig {
     }
 
     fn default_strategy1() -> Self {
-        ObfuscationConfig::new_with_strategy1(64, 400, 100_000, 10_000_000, 1000, 1000)
+        ObfuscationConfig::new_with_strategy1(64, 100_000, 100_000, 10_000_000, 1000, 1000)
     }
 
     fn default_strategy2() -> Self {
-        ObfuscationConfig::new_with_strategy2(64, 200, 200, 10000, 1000000, 1000, 1000)
+        ObfuscationConfig::new_with_strategy2(64, 100_000, 100_000, 10000, 1000000, 1000, 1000)
     }
 }
 
@@ -494,7 +494,7 @@ fn run_obfuscation() {
         // let (original_circuit, _) =
         // sample_circuit_with_base_gate::<2, u8, _>(300, config.n as u8, 1.0, &mut thread_rng());
         // Circuit::sample_mutli_stage_cipher(config.n, thread_rng());
-        let original_circuit = Circuit::sample_mutli_stage_cipher(config.n, thread_rng());
+        let original_circuit = Circuit::sample_multi_stage_cipher(config.n, thread_rng());
 
         std::fs::write(
             &orignal_circuit_path,
