@@ -6,7 +6,7 @@ We use multi-stage block cipher based on reversible circuits proposed in [Quantu
 
 ## Bounty
 
-Visit [obfustopia.io](obfustopia.io) to find more details on the bounrty program to test security of local mixing approach to obfuscation.
+Visit [obfustopia.io](https://obfustopia.io/) to find more details on the bounrty program to test security of local mixing approach to obfuscation.
 
 The [obfuscated.json](./bounty/obfuscated.json) circuit file can be found at [here](./bounty/obfuscated.json).
 
