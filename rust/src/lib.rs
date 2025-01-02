@@ -10,6 +10,7 @@ use petgraph::{
     Direction::{self, Outgoing},
     Graph,
 };
+use rand_chacha::ChaCha8Rng;
 use rand::{
     distributions::{uniform::SampleUniform, Uniform}, seq::SliceRandom, thread_rng, Rng, RngCore, SeedableRng
 };
@@ -2286,14 +2287,19 @@ where
 
     let per_thread = (iterations as f64 / current_num_threads() as f64).ceil() as usize;
 
-    let found_diff_inputs = (0..current_num_threads()).into_par_iter().find_map_any(|_| { 
-        let progress_bar = indicatif::ProgressBar::new(per_thread as u64);
-        progress_bar.set_style(indicatif::ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({percent}%)")
-            .unwrap()
-            .progress_chars("##-"));
+    let multibar = indicatif::MultiProgress::new();
 
-        for value in thread_rng()
+    let found_diff_inputs = (0..current_num_threads()).map(|_| {
+            let progress_bar = indicatif::ProgressBar::new(per_thread as u64);
+            progress_bar.set_style(indicatif::ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({percent}%)")
+                .unwrap()
+                .progress_chars("##-"));
+            (ChaCha8Rng::from_entropy(), multibar.add(progress_bar))
+        }).collect_vec().into_par_iter().find_map_any(|(mut rng, progress_bar)| { 
+
+        // let mut rng = thread_rng();
+        for value in (&mut rng)
                 .sample_iter(Uniform::new(0, 1u128 << n))
                 .take(per_thread)
         {
