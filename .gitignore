@@ -1,0 +1,9 @@
+venv
+target
+*.txt
+log
+*.log
+*.bin
+test_outputs/
+.*/
+*.json

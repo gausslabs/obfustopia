@@ -244,15 +244,14 @@ fn run_strategy1(job: &mut ObfuscationJob, job_path: String, debug: bool) {
             job.config.n as _,
         );
 
-        let (is_correct, diff_indices) = check_probabilisitic_equivalence(
+        let (is_correct, diff_at_input, diff_indices) = check_probabilisitic_equivalence(
             &job.curr_circuit,
             &original_circuit,
             job.config.probabilitic_eq_check_iterations,
-            &mut rng,
         );
         if !is_correct {
             log::error!(
-                "[Error] [Strategy 1] Failed at end of Mixing stage. Different at indices {:?}",
+                "[Error] [Strategy 1] Failed at end of Mixing stage. Different at input={diff_at_input}. Different at indices {:?}",
                 diff_indices
             );
             assert!(false);
@@ -334,15 +333,14 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
                 job.config.n as _,
             );
 
-            let (is_correct, diff_indices) = check_probabilisitic_equivalence(
+            let (is_correct, diff_at_input, diff_indices) = check_probabilisitic_equivalence(
                 &job.curr_circuit,
                 &original_circuit,
                 job.config.probabilitic_eq_check_iterations,
-                &mut rng,
             );
             if !is_correct {
                 log::error!(
-                    "[Error] [Strategy 2] Failed at end of Inflationary stage. Different at indices {:?}",
+                    "[Error] [Strategy 2] Failed at end of Inflationary stage. Different at input={diff_at_input}. Different at indices {:?}",
                     diff_indices
                 );
                 assert!(false);
@@ -406,15 +404,14 @@ fn run_strategy2(job: &mut ObfuscationJob, job_path: String, debug: bool) {
                 job.config.n as _,
             );
 
-            let (is_correct, diff_indices) = check_probabilisitic_equivalence(
+            let (is_correct, diff_at_input, diff_indices) = check_probabilisitic_equivalence(
                 &job.curr_circuit,
                 &original_circuit,
                 job.config.probabilitic_eq_check_iterations,
-                &mut rng,
             );
             if !is_correct {
                 log::error!(
-                    "[Error] [Strategy 2] Failed at end of kneading stage. Different at indices {:?}",
+                    "[Error] [Strategy 2] Failed at end of kneading stage. Different at input={diff_at_input}. Different at indices {:?}",
                     diff_indices
                 );
                 assert!(false);
@@ -577,7 +574,7 @@ fn run_circuits_json_equivalence_check() {
 
     run_verification(&c0, &c1, iterations);
 
-    println!("circuit 0, circuit 1 equivalance check with {iterations} iterations is success");
+    println!("circuit 0, circuit 1 equivalance check with {iterations} iterations finished");
 }
 
 /// Verifies whether 2 circuits are equivalent
@@ -586,12 +583,12 @@ fn run_verification(
     c1: &Circuit<BaseGate<2, u8>>,
     iterations: usize,
 ) {
-    let (success, diff_indices) =
-        check_probabilisitic_equivalence(c0, c1, iterations, &mut thread_rng());
+    let (success, diff_at_input, diff_indices) =
+        check_probabilisitic_equivalence(c0, c1, iterations);
 
     if !success {
         println!(
-            "Equivalance check failed with following different indices: {:?}",
+            "Equivalance check for input={diff_at_input} failed with following different indices: {:?}",
             diff_indices
         );
     }

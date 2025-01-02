@@ -11,9 +11,7 @@ use petgraph::{
     Graph,
 };
 use rand::{
-    distributions::{uniform::SampleUniform, Uniform},
-    seq::SliceRandom,
-    Rng, RngCore, SeedableRng,
+    distributions::{uniform::SampleUniform, Uniform}, seq::SliceRandom, thread_rng, Rng, RngCore, SeedableRng
 };
 use rayon::{
     current_num_threads,
@@ -2244,12 +2242,12 @@ pub fn run_local_mixing<R: Send + Sync + SeedableRng + RngCore>(
                 original_circuit.n(),
             );
 
-            let (is_correct, diff_indices) = check_probabilisitic_equivalence(
+            let (is_correct, _, diff_indices) = check_probabilisitic_equivalence(
                 &original_circuit,
                 &mixed_circuit,
                 probabilitic_eq_check_iterations,
-                rng,
             );
+
             if !is_correct {
                 log::error!(
                     "[Error] (Failed equivalence check at) {tag}. Different at indices {:?}",
@@ -2275,51 +2273,67 @@ pub fn run_local_mixing<R: Send + Sync + SeedableRng + RngCore>(
     success
 }
 
-pub fn check_probabilisitic_equivalence<G, R: RngCore>(
+pub fn check_probabilisitic_equivalence<G>(
     circuit0: &Circuit<G>,
     circuit1: &Circuit<G>,
     iterations: usize,
-    rng: &mut R,
-) -> (bool, Vec<usize>)
+) -> (bool, u128, Vec<usize>)
 where
-    G: Gate<Input = [bool]>,
+    G: Gate<Input = [bool]> + Sync,
 {
     assert_eq!(circuit0.n(), circuit1.n());
     let n = circuit0.n();
 
-    for value in rng
-        .sample_iter(Uniform::new(0, 1u128 << n))
-        .take(iterations)
-    {
-        // for value in 0..1u128 << 16 {
-        let mut inputs = vec![];
-        for i in 0..n {
-            inputs.push((value >> i) & 1u128 == 1);
+    let per_thread = (iterations as f64 / current_num_threads() as f64).ceil() as usize;
+
+    let found_diff_inputs = (0..current_num_threads()).into_par_iter().find_map_any(|_| { 
+        let progress_bar = indicatif::ProgressBar::new(per_thread as u64);
+        progress_bar.set_style(indicatif::ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({percent}%)")
+            .unwrap()
+            .progress_chars("##-"));
+
+        for value in thread_rng()
+                .sample_iter(Uniform::new(0, 1u128 << n))
+                .take(per_thread)
+        {
+            // for value in 0..1u128 << 16 {
+            let mut inputs = vec![];
+            for i in 0..n {
+                inputs.push((value >> i) & 1u128 == 1);
+            }
+
+            let mut inputs0 = inputs.clone();
+            circuit0.run(&mut inputs0);
+
+            let mut inputs1 = inputs.clone();
+            circuit1.run(&mut inputs1);
+
+            let mut diff_indices = vec![];
+            if inputs0 != inputs1 {
+                izip!(inputs0.iter(), inputs1.iter())
+                    .enumerate()
+                    .for_each(|(index, (v0, v1))| {
+                        if v0 != v1 {
+                            diff_indices.push(index);
+                        }
+                    });
+
+                progress_bar.finish();
+                return Some((false, value, diff_indices));
+            }
+            // assert_eq!(inputs0, inputs1, "Different at indices {:?}", diff_indices);
+            progress_bar.inc(1);
         }
+        progress_bar.finish();
+        return None;
+    });
 
-        let mut inputs0 = inputs.clone();
-        circuit0.run(&mut inputs0);
-
-        let mut inputs1 = inputs.clone();
-        circuit1.run(&mut inputs1);
-
-        let mut diff_indices = vec![];
-        if inputs0 != inputs1 {
-            izip!(inputs0.iter(), inputs1.iter())
-                .enumerate()
-                .for_each(|(index, (v0, v1))| {
-                    if v0 != v1 {
-                        diff_indices.push(index);
-                    }
-                });
-
-            return (false, diff_indices);
-        }
-
-        // assert_eq!(inputs0, inputs1, "Different at indices {:?}", diff_indices);
+    if found_diff_inputs.is_some() {
+        return found_diff_inputs.unwrap();
     }
 
-    return (true, vec![]);
+    return (true, 0u128,vec![]);
 }
 
 #[cfg(test)]
@@ -2432,11 +2446,10 @@ mod tests {
                     &gate_map,
                     original_circuit.n(),
                 );
-                let (is_correct, diff_indices) = check_probabilisitic_equivalence(
+                let (is_correct, _, diff_indices) = check_probabilisitic_equivalence(
                     &original_circuit,
                     &mixed_circuit,
                     1000,
-                    &mut rng,
                 );
                 if !is_correct {
                     println!("[Error] Different at indices {:?}", diff_indices);
